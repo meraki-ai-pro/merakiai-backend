@@ -40,6 +40,9 @@ logs/
 .coverage
 htmlcov/
 .tox/
+tests/
+scripts/
+docs/
 
 # IDE
 .vscode/
