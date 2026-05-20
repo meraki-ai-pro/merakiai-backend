@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 _CONFIG_PATH = Path(__file__).resolve().parents[2] / "llm_config.json"
 _lock = threading.Lock()
+
+# M-18: in-memory cache so every LLM call doesn't hit the disk.
+# Invalidated on every write; safe because all writes go through _lock.
+_overrides_cache: Optional[Dict[str, Any]] = None
 
 VALID_MODES = {"learn", "application", "review", "review_generation"}
 
@@ -36,12 +41,28 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
 
 
 def _load_overrides() -> Dict[str, Any]:
-    if not _CONFIG_PATH.exists():
-        return {}
-    try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """Return the on-disk overrides, using the in-memory cache when available.
+
+    M-18: reads from cache on the hot path; only hits disk on first load or
+    after a write (cache is cleared inside _lock in update/reset).
+    """
+    global _overrides_cache
+    # Fast path: cache is warm (no lock needed for reads after first load)
+    if _overrides_cache is not None:
+        return _overrides_cache
+    # Slow path: first read or post-invalidation
+    with _lock:
+        # Double-check inside the lock — another thread may have populated it
+        if _overrides_cache is not None:
+            return _overrides_cache
+        if not _CONFIG_PATH.exists():
+            _overrides_cache = {}
+            return _overrides_cache
+        try:
+            _overrides_cache = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            _overrides_cache = {}
+        return _overrides_cache
 
 
 def get_all_configs() -> Dict[str, Dict[str, Any]]:
@@ -63,6 +84,7 @@ def get_mode_config(mode: str) -> Dict[str, Any]:
 
 
 def update_mode_config(mode: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    global _overrides_cache
     if mode not in VALID_MODES:
         raise ValueError(f"Invalid mode: {mode!r}")
     with _lock:
@@ -70,12 +92,24 @@ def update_mode_config(mode: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         existing = dict(overrides.get(mode, {}))
         existing.update(updates)
         overrides[mode] = existing
-        _CONFIG_PATH.write_text(json.dumps(overrides, indent=2), encoding="utf-8")
+
+        # M-10: atomic write — write to a sibling temp file then rename.
+        # Rename is atomic on POSIX and near-atomic on Windows (Python 3.3+).
+        tmp_path = _CONFIG_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(overrides, indent=2), encoding="utf-8")
+        tmp_path.replace(_CONFIG_PATH)
+
+        # M-18: invalidate cache so the next read picks up the new values
+        _overrides_cache = overrides
+
     return get_mode_config(mode)
 
 
 def reset_all_configs() -> Dict[str, Dict[str, Any]]:
+    global _overrides_cache
     with _lock:
         if _CONFIG_PATH.exists():
             _CONFIG_PATH.unlink()
+        # M-18: clear cache so the next read starts fresh
+        _overrides_cache = None
     return dict(DEFAULTS)

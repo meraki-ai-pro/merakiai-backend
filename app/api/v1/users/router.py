@@ -1,9 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from app.core.auth import auth_guard
 from app.db.supabase import get_user_client
 from app.models.models import AvatarSelectRequest
 
 router = APIRouter(prefix="/users", tags=["Users"])
+
+_MAX_PROFILE_PIC_BYTES = 5 * 1024 * 1024  # 5 MB
+_ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
 
 @router.get("/me")
 def get_me(user=Depends(auth_guard)):
@@ -16,14 +20,73 @@ def get_me(user=Depends(auth_guard)):
         "id": row["id"],
         "email": row["email"],
         "role": row["role"],
-        "avatar_id": row["avatar_id"],
-        "avatar_provider": row["avatar_provider"],
+        "avatar_id": row.get("avatar_id"),
+        "avatar_provider": row.get("avatar_provider"),
         "avatar_gender": row.get("avatar_gender"),
         "voice_provider": row.get("voice_provider"),
         "voice_id": row.get("voice_id"),
         "voice_gender": row.get("voice_gender"),
+        "profile_picture_url": row.get("profile_picture_url"),
         "created_at": row.get("created_at"),
     }
+
+@router.post("/me/profile-picture")
+async def upload_profile_picture(
+    file: UploadFile = File(...),
+    user=Depends(auth_guard),
+):
+    """
+    Upload or replace the authenticated user's profile picture.
+    Accepted formats: JPEG, PNG, WebP. Max size: 5 MB.
+    The image is stored in the 'user-profile-pics' Supabase Storage bucket
+    at path '{user_id}/profile.{ext}' and the public URL is saved to the
+    users table.
+    """
+    # Validate content type before reading bytes
+    content_type = file.content_type or ""
+    if content_type not in _ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported image type '{content_type}'. Allowed: JPEG, PNG, WebP.",
+        )
+
+    image_bytes = await file.read()
+
+    if len(image_bytes) > _MAX_PROFILE_PIC_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image exceeds the 5 MB limit ({len(image_bytes) // (1024 * 1024)} MB received).",
+        )
+
+    # Magic-byte validation — content-type header alone is not trustworthy
+    if content_type == "image/jpeg" and not image_bytes[:2] == b"\xff\xd8":
+        raise HTTPException(status_code=415, detail="File does not appear to be a valid JPEG.")
+    if content_type == "image/png" and not image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        raise HTTPException(status_code=415, detail="File does not appear to be a valid PNG.")
+    if content_type == "image/webp" and not (image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP"):
+        raise HTTPException(status_code=415, detail="File does not appear to be a valid WebP.")
+
+    from app.media.storage_service import upload_profile_picture as _upload
+    try:
+        public_url = _upload(
+            user_id=user["id"],
+            image_bytes=image_bytes,
+            content_type=content_type,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Persist the public URL on the user's profile
+    supabase = get_user_client(user["token"])
+    supabase.table("users").update(
+        {"profile_picture_url": public_url}
+    ).eq("id", user["id"]).execute()
+
+    return {
+        "status": "ok",
+        "profile_picture_url": public_url,
+    }
+
 
 @router.patch("/me/avatar")
 def update_avatar(payload: AvatarSelectRequest, user=Depends(auth_guard)):

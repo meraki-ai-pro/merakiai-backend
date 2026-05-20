@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.core.auth import admin_guard
 from app.db.supabase import get_supabase
+
+# Characters that have special meaning in PostgREST filter strings.
+# Stripping them prevents filter-injection through the search parameter.
+_POSTGREST_METACHAR_RE = re.compile(r"[,.()\[\]{}]")
 
 router = APIRouter(prefix="/users", tags=["Admin – Users"])
 
@@ -33,7 +40,14 @@ def list_users(
     if role:
         q = q.eq("role", role)
     if search:
-        q = q.or_(f"email.ilike.%{search}%,first_name.ilike.%{search}%,last_name.ilike.%{search}%")
+        # H-5: strip PostgREST metacharacters and cap length before interpolating
+        # into the filter string to prevent filter-tree injection.
+        safe_search = _POSTGREST_METACHAR_RE.sub("", search)[:100]
+        q = q.or_(
+            f"email.ilike.%{safe_search}%,"
+            f"first_name.ilike.%{safe_search}%,"
+            f"last_name.ilike.%{safe_search}%"
+        )
 
     res = q.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
     return {
@@ -45,30 +59,34 @@ def list_users(
 
 
 @router.get("/{user_id}")
-def get_user_detail(user_id: str, _user=Depends(admin_guard)):
-    sb = get_supabase()
-
-    profile = sb.table("users").select("*").eq("id", user_id).single().execute().data
+async def get_user_detail(user_id: str, _user=Depends(admin_guard)):
+    # Fetch profile first — no point running the parallel queries if user not found
+    profile = await asyncio.to_thread(
+        lambda: get_supabase().table("users").select("*").eq("id", user_id).single().execute().data
+    )
     if not profile:
         raise HTTPException(status_code=404, detail="User not found")
 
-    sessions_res = sb.table("sessions").select("id", count="exact").eq("user_id", user_id).limit(0).execute()
-    conversations_res = sb.table("conversations").select("id", count="exact").eq("user_id", user_id).limit(0).execute()
-    reviews_res = sb.table("review_summaries").select("overall_score").eq("user_id", user_id).execute()
-    logins_res = sb.table("platform_sessions").select("login_at").eq("user_id", user_id).order("login_at", desc=True).limit(1).execute()
-    feedback_res = sb.table("user_feedback").select("feedback_type, message, created_at").eq("user_id", user_id).order("created_at", desc=True).execute()
+    # M-14: run all 5 independent follow-up queries concurrently instead of sequentially
+    (sessions_res, conversations_res, reviews_res, logins_res, feedback_res) = await asyncio.gather(
+        asyncio.to_thread(lambda: get_supabase().table("sessions").select("id", count="exact").eq("user_id", user_id).limit(0).execute()),
+        asyncio.to_thread(lambda: get_supabase().table("conversations").select("id", count="exact").eq("user_id", user_id).limit(0).execute()),
+        asyncio.to_thread(lambda: get_supabase().table("review_summaries").select("overall_score").eq("user_id", user_id).limit(500).execute()),
+        asyncio.to_thread(lambda: get_supabase().table("platform_sessions").select("login_at").eq("user_id", user_id).order("login_at", desc=True).limit(1).execute()),
+        asyncio.to_thread(lambda: get_supabase().table("user_feedback").select("feedback_type, message, created_at").eq("user_id", user_id).order("created_at", desc=True).limit(50).execute()),
+    )
 
-    scores = [r["overall_score"] for r in (reviews_res.data or []) if r["overall_score"] is not None]
+    scores    = [r["overall_score"] for r in (reviews_res.data or []) if r["overall_score"] is not None]
     avg_score = round(sum(scores) / len(scores), 2) if scores else None
 
     return {
         "profile": profile,
         "stats": {
-            "total_sessions": sessions_res.count or 0,
+            "total_sessions":      sessions_res.count or 0,
             "total_conversations": conversations_res.count or 0,
-            "total_reviews": len(reviews_res.data or []),
-            "avg_review_score": avg_score,
-            "last_login": logins_res.data[0]["login_at"] if logins_res.data else None,
+            "total_reviews":       len(reviews_res.data or []),
+            "avg_review_score":    avg_score,
+            "last_login":          logins_res.data[0]["login_at"] if logins_res.data else None,
         },
         "recent_feedback": feedback_res.data or [],
     }

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 from fastapi import HTTPException
@@ -184,8 +186,15 @@ async def maybe_generate_video(
         try:
             if use_webhooks:
                 # Opt 3: fire-and-forget
-                secret_param = f"?secret={_webhook_secret}" if _webhook_secret else ""
-                callback_url = f"{_PUBLIC_BASE_URL}/webhooks/tavus/{session_id}{secret_param}"
+                # M-7: pass an HMAC-SHA256 token instead of the raw secret so the
+                # secret is never visible in URL logs or server-side access logs.
+                if _webhook_secret:
+                    _token = hmac.new(
+                        _webhook_secret.encode(), session_id.encode(), hashlib.sha256
+                    ).hexdigest()
+                    callback_url = f"{_PUBLIC_BASE_URL}/webhooks/tavus/{session_id}?token={_token}"
+                else:
+                    callback_url = f"{_PUBLIC_BASE_URL}/webhooks/tavus/{session_id}"
                 video_id = await asyncio.to_thread(
                     create_tavus_video_async,
                     replica_id=replica_id,

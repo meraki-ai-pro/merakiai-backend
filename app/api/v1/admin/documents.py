@@ -60,15 +60,32 @@ def get_document(doc_id: str, _user=Depends(admin_guard)):
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    chunks = sb.table("document_chunks").select(
-        "id, pinecone_id, pinecone_namespace, mode, topic, difficulty, created_at"
-    ).eq("document_id", doc_id).execute().data or []
+    # M-20: get exact count cheaply, then fetch only the rows we actually display.
+    count_res = (
+        sb.table("document_chunks")
+        .select("id", count="exact")
+        .eq("document_id", doc_id)
+        .limit(0)
+        .execute()
+    )
+    chunk_count = count_res.count or 0
+
+    # Fetch enough rows to cover the preview (10) and collect all distinct
+    # namespaces (documents rarely span more than a handful of namespaces).
+    chunks = (
+        sb.table("document_chunks")
+        .select("id, pinecone_id, pinecone_namespace, mode, topic, difficulty, created_at")
+        .eq("document_id", doc_id)
+        .limit(200)
+        .execute()
+        .data or []
+    )
 
     namespaces = list({c["pinecone_namespace"] for c in chunks})
 
     return {
         "document": doc,
-        "chunk_count": len(chunks),
+        "chunk_count": chunk_count,
         "namespaces": namespaces,
         "chunks_preview": chunks[:10],
     }

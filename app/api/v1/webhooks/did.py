@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets as _secrets
 
 import redis as redis_sync
 from fastapi import APIRouter, HTTPException, Request
@@ -25,7 +26,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
 
-_WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+def _get_webhook_secret() -> str:
+    """Return the webhook secret, raising 500 at request time if unset.
+
+    Reading from os.environ at request time (rather than module level) ensures
+    the value is always picked up after load_env() has run at startup.
+    """
+    secret = os.getenv("WEBHOOK_SECRET", "")
+    if not secret:
+        logger.error("WEBHOOK_SECRET is not configured — rejecting webhook call")
+        raise HTTPException(
+            status_code=500,
+            detail="Webhook endpoint is not properly configured on the server.",
+        )
+    return secret
 
 
 @router.post("/did/{session_id}")
@@ -39,15 +53,20 @@ async def did_webhook(session_id: str, request: Request):
     Security: D-ID sends the webhook_secret back as "Authorization: Bearer <secret>".
     We also accept it via ?secret=<value> query param as a fallback.
     """
-    if _WEBHOOK_SECRET:
-        # Check Authorization header (D-ID native approach)
-        auth_header = request.headers.get("Authorization", "")
-        expected = f"Bearer {_WEBHOOK_SECRET}"
-        # Fallback: ?secret= query param (Tavus / generic approach)
-        query_secret = request.query_params.get("secret", "")
-        if auth_header != expected and query_secret != _WEBHOOK_SECRET:
-            logger.warning("D-ID webhook rejected — invalid secret  session=%s", session_id)
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    # C-3: auth is always enforced — 500 if WEBHOOK_SECRET is not set.
+    webhook_secret = _get_webhook_secret()
+
+    # C-2: constant-time comparisons prevent timing side-channel attacks.
+    auth_header = request.headers.get("Authorization", "")
+    expected_header = f"Bearer {webhook_secret}"
+    query_secret = request.query_params.get("secret", "")
+
+    header_valid = _secrets.compare_digest(auth_header, expected_header)
+    query_valid = _secrets.compare_digest(query_secret, webhook_secret)
+
+    if not header_valid and not query_valid:
+        logger.warning("D-ID webhook rejected — invalid secret  session=%s", session_id)
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
         payload = await request.json()

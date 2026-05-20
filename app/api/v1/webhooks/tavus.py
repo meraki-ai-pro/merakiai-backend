@@ -25,9 +25,12 @@ Tavus webhook payload on completion (status "ready"):
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets as _secrets
 
 import redis as redis_sync
 from fastapi import APIRouter, HTTPException, Request
@@ -36,7 +39,21 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
-_WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
+def _get_webhook_secret() -> str:
+    """Return the webhook secret, raising 500 at request time if unset.
+
+    Reading from os.environ at request time (rather than module level) ensures
+    the value is always picked up after load_env() has run at startup.
+    """
+    secret = os.getenv("WEBHOOK_SECRET", "")
+    if not secret:
+        logger.error("WEBHOOK_SECRET is not configured — rejecting webhook call")
+        raise HTTPException(
+            status_code=500,
+            detail="Webhook endpoint is not properly configured on the server.",
+        )
+    return secret
 
 
 @router.post("/tavus/{session_id}")
@@ -51,12 +68,20 @@ async def tavus_webhook(session_id: str, request: Request):
         stream_url    — HLS stream (.m3u8)
         status_details — human-readable message
     """
-    if _WEBHOOK_SECRET:
-        # Tavus passes the secret via ?secret= query param in the callback URL
-        query_secret = request.query_params.get("secret", "")
-        if query_secret != _WEBHOOK_SECRET:
-            logger.warning("Tavus webhook rejected — invalid secret  session=%s", session_id)
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    # C-3: auth is always enforced — 500 if WEBHOOK_SECRET is not set.
+    webhook_secret = _get_webhook_secret()
+
+    # M-7 / C-2: validate the per-session HMAC token.
+    # video_service.py computes token = HMAC-SHA256(secret, session_id) and puts
+    # it in the ?token= param — the raw secret is never present in the URL.
+    # constant-time compare prevents timing side-channel attacks.
+    token = request.query_params.get("token", "")
+    expected = hmac.new(
+        webhook_secret.encode(), session_id.encode(), hashlib.sha256
+    ).hexdigest()
+    if not _secrets.compare_digest(token, expected):
+        logger.warning("Tavus webhook rejected — invalid token  session=%s", session_id)
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
         payload = await request.json()

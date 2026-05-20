@@ -6,7 +6,17 @@ from app.config import load_env
 
 load_env()
 
-rabbitmq_url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672//")
+# L-5: never fall back to the well-known RabbitMQ default credentials.
+# Fail loudly at startup if the env var is missing so a misconfigured
+# production deployment is caught immediately rather than silently using
+# the insecure guest/guest account.
+rabbitmq_url = os.getenv("RABBITMQ_URL")
+if not rabbitmq_url:
+    raise RuntimeError(
+        "RABBITMQ_URL is not set. "
+        "Provide it via .env or AWS Secrets Manager (e.g. amqp://user:pass@host:5672//)."
+    )
+
 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # ---------------------------------------------------------------------------
@@ -19,9 +29,10 @@ redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # routed to "dlx" instead of silently dropped.
 # ---------------------------------------------------------------------------
 
-_text_exchange  = Exchange("text_tasks",  type="direct")
-_video_exchange = Exchange("video_tasks", type="direct")
-_dlx_exchange   = Exchange("dlx",         type="direct")
+_text_exchange      = Exchange("text_tasks",      type="direct")
+_video_exchange     = Exchange("video_tasks",     type="direct")
+_ingestion_exchange = Exchange("ingestion_tasks", type="direct")
+_dlx_exchange       = Exchange("dlx",             type="direct")
 
 task_queues = (
     Queue(
@@ -39,6 +50,16 @@ task_queues = (
         routing_key="video",
         queue_arguments={
             "x-max-priority": 10,
+            "x-dead-letter-exchange": "dlx",
+        },
+    ),
+    Queue(
+        "ingestion_tasks",
+        _ingestion_exchange,
+        routing_key="ingestion",
+        # No priority needed — ingestion is always a single admin job.
+        # DLX still catches failures so nothing is silently dropped.
+        queue_arguments={
             "x-dead-letter-exchange": "dlx",
         },
     ),
@@ -79,5 +100,6 @@ celery_app.conf.update(
     task_routes={
         "app.ai.tasks.process_mode_session_start_task": {"queue": "text_tasks"},
         "app.ai.tasks.process_mode_session_turn_task":  {"queue": "text_tasks"},
+        "app.ai.tasks.process_ingestion_task":          {"queue": "ingestion_tasks"},
     },
 )

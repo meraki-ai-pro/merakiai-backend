@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from celery.result import AsyncResult
 
 from app.core.auth import auth_guard
@@ -14,6 +14,9 @@ from app.ai.tasks import process_mode_session_start_task, process_mode_session_t
 from app.core.celery_app import celery_app
 
 router = APIRouter(prefix="/mode-sessions", tags=["Mode Sessions"])
+
+# M-5: 25 MB cap on voice audio uploads
+_MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
 
 def _now_iso() -> str:
@@ -58,8 +61,8 @@ async def _stt(audio_bytes: bytes, filename: str) -> str:
 @router.get("/")
 def list_mode_sessions(
     session_id: str,
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = Query(20, ge=1, le=100),  # M-6: bounded pagination
+    offset: int = Query(0, ge=0),
     user=Depends(auth_guard),
 ):
     supabase = get_user_client(user["token"])
@@ -204,7 +207,10 @@ async def mode_session_turn_voice(
     file: UploadFile = File(...),
     user=Depends(auth_guard),
 ):
-    audio_bytes = await file.read()
+    # M-5: enforce size limit before reading the full file into memory
+    audio_bytes = await file.read(_MAX_AUDIO_BYTES + 1)
+    if len(audio_bytes) > _MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio file exceeds the 25 MB limit.")
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio upload")
 

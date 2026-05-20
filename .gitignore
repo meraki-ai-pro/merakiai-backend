@@ -56,3 +56,5 @@ Thumbs.db
 
 # Alembic (keep migrations, ignore local dev artefacts)
 alembic/versions/__pycache__/
+
+Frontend/

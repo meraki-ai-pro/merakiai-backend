@@ -6,10 +6,6 @@ import time
 import requests
 from typing import Any, Dict, Optional
 
-from app.config import load_env
-
-load_env()
-
 DID_API_KEY = os.getenv("DID_API_KEY")
 if not DID_API_KEY:
     raise RuntimeError("Missing DID_API_KEY")

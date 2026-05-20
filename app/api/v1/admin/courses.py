@@ -29,9 +29,11 @@ def list_courses(_user=Depends(admin_guard)):
     sb = get_supabase()
     courses = sb.table("courses").select("*").order("created_at", desc=True).execute().data or []
 
-    # Attach document counts per course
-    doc_rows = sb.table("documents").select("course_id").execute().data or []
+    # M-19: fetch only course_id with a row cap — avoids a full-table scan.
+    # For very large deployments this may under-count if > 10 000 docs exist,
+    # but is safe for the expected scale and far cheaper than a full scan.
     from collections import Counter
+    doc_rows = sb.table("documents").select("course_id").limit(10000).execute().data or []
     doc_counts = Counter(r["course_id"] for r in doc_rows if r.get("course_id"))
 
     for c in courses:

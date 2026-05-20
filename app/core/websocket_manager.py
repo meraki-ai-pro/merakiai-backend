@@ -22,6 +22,9 @@ class WebSocketManager:
     Connection lifecycle:
         connect()    → accept WS, register, start Redis listener
         disconnect() → remove WS, cancel Redis listener, clean up
+
+    L-8: a single ConnectionPool is shared across all per-session listeners
+    instead of opening a new TCP connection for every WebSocket session.
     """
 
     def __init__(self) -> None:
@@ -30,6 +33,13 @@ class WebSocketManager:
         # session_id → running asyncio listener task
         self._listeners: dict[str, asyncio.Task] = {}
         self._redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        # L-8: shared pool; max_connections = 10 pub/sub connections should be
+        # more than enough since each listener only subscribes to one channel.
+        self._pool: aioredis.ConnectionPool = aioredis.ConnectionPool.from_url(
+            self._redis_url,
+            decode_responses=True,
+            max_connections=10,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -89,7 +99,8 @@ class WebSocketManager:
         the connection; cancelled via disconnect().
         """
         channel = f"ws:{session_id}"
-        redis = aioredis.from_url(self._redis_url, decode_responses=True)
+        # L-8: use the shared pool — no new TCP connection per session
+        redis = aioredis.Redis(connection_pool=self._pool)
         pubsub = redis.pubsub()
 
         try:
@@ -111,9 +122,11 @@ class WebSocketManager:
         finally:
             try:
                 await pubsub.unsubscribe(channel)
-                await redis.aclose()
+                await pubsub.aclose()
+                # L-8: do NOT call redis.aclose() — the connection is returned
+                # to the shared pool, not closed.
             except Exception:
-                logger.debug("Failed to close Redis connection  session=%s", session_id)
+                logger.debug("Failed to unsubscribe Redis pubsub  session=%s", session_id)
 
 
 # ---------------------------------------------------------------------------

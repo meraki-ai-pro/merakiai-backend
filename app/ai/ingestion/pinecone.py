@@ -3,10 +3,6 @@ import uuid
 import json
 from pinecone import Pinecone
 
-from app.config import load_env
-
-load_env()
-
 api_key = os.getenv("PINECONE_API_KEY")
 index_name = os.getenv("PINECONE_INDEX") or os.getenv("PINECONE_INDEX_NAME")
 

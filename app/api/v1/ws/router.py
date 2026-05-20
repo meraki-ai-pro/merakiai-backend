@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -11,7 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from app.core.auth import _validate_token
 from app.core.websocket_manager import manager
 from app.core import analytics
-from app.db.supabase import get_supabase, get_async_supabase
+from app.db.supabase import get_user_client, get_async_supabase
 from app.ai.tasks import (
     process_rag_turn_task,
     process_mode_session_start_task,
@@ -35,6 +37,83 @@ _VIDEO_PRIORITY = 3
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Per-session WebSocket message rate limiter (M-2)
+# Sliding-window, in-memory. Cleaned up on WS disconnect.
+# ---------------------------------------------------------------------------
+_WS_MAX_MSGS_PER_MINUTE = 20
+_ws_msg_timestamps: dict[str, list[float]] = defaultdict(list)
+
+
+def _ws_rate_check(session_id: str) -> bool:
+    """Return True if the message is allowed, False if rate-limited."""
+    now = time.monotonic()
+    cutoff = now - 60.0
+    ts = [t for t in _ws_msg_timestamps[session_id] if t > cutoff]
+    _ws_msg_timestamps[session_id] = ts
+    if len(ts) >= _WS_MAX_MSGS_PER_MINUTE:
+        return False
+    _ws_msg_timestamps[session_id].append(now)
+    return True
+
+
+def _ws_rate_cleanup(session_id: str) -> None:
+    """Remove rate-limit state when the WebSocket disconnects."""
+    _ws_msg_timestamps.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Sync DB helpers — called via asyncio.to_thread so the event loop is never
+# blocked. Each uses get_user_client(token) so Postgres RLS is enforced at
+# the DB level under the authenticated user's identity (H-1).
+# ---------------------------------------------------------------------------
+
+def _db_create_mode_session(token: str, payload: dict) -> dict | None:
+    """Insert a new mode_session row as the authenticated user."""
+    res = get_user_client(token).table("mode_sessions").insert(payload).execute()
+    return res.data[0] if res.data else None
+
+
+def _db_fetch_mode_session_and_state(
+    token: str, mode_session_id: str
+) -> tuple[dict | None, dict | None]:
+    """Fetch mode_session + session_state rows owned by the authenticated user.
+
+    RLS ensures rows from other users are invisible — no manual user_id check
+    needed, though we keep it below as defence-in-depth.
+    """
+    sb = get_user_client(token)
+    ms_res = sb.table("mode_sessions").select("*").eq("id", mode_session_id).execute()
+    if not ms_res.data:
+        return None, None
+    st_res = (
+        sb.table("session_state")
+        .select("*")
+        .eq("mode_session_id", mode_session_id)
+        .execute()
+    )
+    return ms_res.data[0], (st_res.data[0] if st_res.data else None)
+
+
+def _db_end_mode_session(token: str, mode_session_id: str) -> dict | None:
+    """Mark a mode_session as completed and delete its transient state."""
+    sb = get_user_client(token)
+    ms_res = (
+        sb.table("mode_sessions")
+        .select("user_id, completed")
+        .eq("id", mode_session_id)
+        .execute()
+    )
+    if not ms_res.data:
+        return None
+    sb.table("mode_sessions").update({
+        "completed": True,
+        "ended_at": _now_iso(),
+    }).eq("id", mode_session_id).execute()
+    sb.table("session_state").delete().eq("mode_session_id", mode_session_id).execute()
+    return ms_res.data[0]
 
 
 async def _session_prefers_video(session_id: str) -> bool:
@@ -93,6 +172,13 @@ async def websocket_endpoint(
                 await websocket.send_json({"error": "Invalid JSON"})
                 continue
 
+            # M-2: per-session sliding-window rate limit
+            if not _ws_rate_check(session_id):
+                await websocket.send_json({
+                    "error": f"Rate limit exceeded. Max {_WS_MAX_MSGS_PER_MINUTE} messages per minute."
+                })
+                continue
+
             msg_type: str = data.get("type", "")
 
             # ---------------------------------------------------------------
@@ -108,8 +194,9 @@ async def websocket_endpoint(
                 queue    = _VIDEO_QUEUE    if prefers_video else _TEXT_QUEUE
                 priority = _VIDEO_PRIORITY if prefers_video else _TEXT_PRIORITY
 
+                # M-17: pass prefers_video to avoid a duplicate DB lookup inside the task
                 task = process_rag_turn_task.apply_async(
-                    args=[session_id, user_id, message, "learn"],
+                    args=[session_id, user_id, message, "learn", prefers_video],
                     queue=queue,
                     priority=priority,
                 )
@@ -122,30 +209,34 @@ async def websocket_endpoint(
                 mode         = (data.get("mode") or "").lower().strip()
                 session_type = (data.get("session_type") or "").lower().strip()
                 difficulty   = (data.get("difficulty") or "Basic").strip().title()
-                total_items  = int(data.get("total_items") or 10)
+                # M-9: cap total_items to prevent a single user spawning unlimited AI calls
+                total_items  = min(int(data.get("total_items") or 10), 50)
 
                 if mode not in ("application", "review"):
                     await websocket.send_json({"error": "mode must be 'application' or 'review'"})
                     continue
 
-                supabase = get_supabase()
-                ms = supabase.table("mode_sessions").insert({
-                    "session_id":   session_id,
-                    "user_id":      user_id,
-                    "mode":         mode,
-                    "session_type": session_type,
-                    "difficulty":   difficulty,
-                    "total_items":  total_items if mode == "review" else 3,
-                    "current_item": 1,
-                    "completed":    False,
-                    "started_at":   _now_iso(),
-                }).execute()
+                ms_row = await asyncio.to_thread(
+                    _db_create_mode_session,
+                    token,
+                    {
+                        "session_id":   session_id,
+                        "user_id":      user_id,
+                        "mode":         mode,
+                        "session_type": session_type,
+                        "difficulty":   difficulty,
+                        "total_items":  total_items if mode == "review" else 3,
+                        "current_item": 1,
+                        "completed":    False,
+                        "started_at":   _now_iso(),
+                    },
+                )
 
-                if not ms.data:
+                if not ms_row:
                     await websocket.send_json({"error": "Failed to create mode session"})
                     continue
 
-                mode_session_id: str = ms.data[0]["id"]
+                mode_session_id: str = ms_row["id"]
 
                 task = process_mode_session_start_task.apply_async(
                     args=[session_id, user_id, mode, session_type, difficulty, mode_session_id],
@@ -171,36 +262,24 @@ async def websocket_endpoint(
                     )
                     continue
 
-                supabase = get_supabase()
-
-                ms_res = (
-                    supabase.table("mode_sessions")
-                    .select("*")
-                    .eq("id", mode_session_id)
-                    .execute()
+                ms, state = await asyncio.to_thread(
+                    _db_fetch_mode_session_and_state, token, mode_session_id
                 )
-                if not ms_res.data:
+
+                if not ms:
                     await websocket.send_json({"error": "Mode session not found"})
                     continue
 
-                ms = ms_res.data[0]
+                # Defence-in-depth: RLS already filters by owner; double-check here.
                 if ms["user_id"] != user_id:
                     await websocket.send_json({"error": "Not allowed"})
                     continue
 
-                st_res = (
-                    supabase.table("session_state")
-                    .select("*")
-                    .eq("mode_session_id", mode_session_id)
-                    .execute()
-                )
-                if not st_res.data:
+                if not state:
                     await websocket.send_json(
                         {"error": "No active state for this mode session"}
                     )
                     continue
-
-                state = st_res.data[0]
 
                 task = process_mode_session_turn_task.apply_async(
                     args=[
@@ -232,29 +311,18 @@ async def websocket_endpoint(
                     await websocket.send_json({"error": "mode_session_id is required"})
                     continue
 
-                supabase = get_supabase()
-                ms_res = (
-                    supabase.table("mode_sessions")
-                    .select("user_id, completed")
-                    .eq("id", mode_session_id)
-                    .execute()
+                ms_end = await asyncio.to_thread(
+                    _db_end_mode_session, token, mode_session_id
                 )
-                if not ms_res.data:
+
+                if not ms_end:
                     await websocket.send_json({"error": "Mode session not found"})
                     continue
 
-                if ms_res.data[0]["user_id"] != user_id:
+                # Defence-in-depth ownership check (RLS already enforces this).
+                if ms_end["user_id"] != user_id:
                     await websocket.send_json({"error": "Not allowed"})
                     continue
-
-                supabase.table("mode_sessions").update({
-                    "completed": True,
-                    "ended_at":  _now_iso(),
-                }).eq("id", mode_session_id).execute()
-
-                supabase.table("session_state").delete().eq(
-                    "mode_session_id", mode_session_id
-                ).execute()
 
                 # Compute and store mode session duration
                 await asyncio.to_thread(analytics.close_mode_session, mode_session_id)
@@ -272,7 +340,7 @@ async def websocket_endpoint(
     except Exception as exc:
         logger.error("WS error  session=%s  error=%s", session_id, exc)
     finally:
-        # Close WS session analytics — computes active usage duration
+        _ws_rate_cleanup(session_id)  # M-2: release in-memory rate-limit state
         if ws_session_id:
             await asyncio.to_thread(analytics.close_ws_session, ws_session_id)
         await manager.disconnect(session_id)

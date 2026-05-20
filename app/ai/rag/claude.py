@@ -9,10 +9,7 @@ from typing import Any, Dict, List, Optional
 from anthropic import Anthropic
 from anthropic._exceptions import OverloadedError, APIError, RateLimitError, APITimeoutError
 
-from app.config import load_env
 from app.core.llm_config import get_mode_config  # noqa: F401 — re-exported for callers
-
-load_env()
 
 api_key = os.getenv("ANTHROPIC_API_KEY")
 if not api_key:

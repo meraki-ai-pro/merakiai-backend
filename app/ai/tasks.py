@@ -1,10 +1,13 @@
 import asyncio
 import json
+import logging
 import os
 import time
 
 import redis as redis_sync
 from celery import shared_task
+
+logger = logging.getLogger(__name__)
 
 from app.core.chat_repo import (
     load_memory,
@@ -20,40 +23,84 @@ from app.core import analytics
 
 
 # ---------------------------------------------------------------------------
+# Redis singleton — shared across all tasks in this worker process (M-12).
+# Eliminates the per-publish TCP connection that the old from_url()/close()
+# pattern created.
+# ---------------------------------------------------------------------------
+
+_redis_client: redis_sync.Redis | None = None
+
+
+def _get_redis() -> redis_sync.Redis:
+    global _redis_client
+    if _redis_client is None:
+        pool = redis_sync.ConnectionPool.from_url(
+            os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            decode_responses=True,
+            max_connections=10,
+        )
+        _redis_client = redis_sync.Redis(connection_pool=pool)
+    return _redis_client
+
+
+# ---------------------------------------------------------------------------
 # Redis Pub/Sub delivery helper
 # ---------------------------------------------------------------------------
 
 def _publish_to_ws(session_id: str, result: dict) -> None:
     """Publish task result to Redis Pub/Sub for WebSocket delivery."""
     try:
-        r = redis_sync.from_url(
-            os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-            decode_responses=True,
-        )
-        r.publish(f"ws:{session_id}", json.dumps(result))
-        r.close()
+        _get_redis().publish(f"ws:{session_id}", json.dumps(result))
     except Exception as exc:
-        print(f"[tasks] Failed to publish WS result  session={session_id}  error={exc}")
+        logger.error(
+            "Failed to publish WS result  session=%s  error=%s", session_id, exc
+        )
 
 
 # ---------------------------------------------------------------------------
-# Shared course-info loader
+# Shared course-info loader with Redis cache (M-16)
+# session_id → course mapping is immutable; cache for 1 hour.
 # ---------------------------------------------------------------------------
+
+_COURSE_CACHE_TTL = 3600  # seconds
+
 
 async def _load_course(session_id: str) -> dict:
+    """Fetch course metadata for a session, using Redis to avoid repeated DB calls.
+
+    The session_id → course_id mapping never changes after session creation,
+    so a 1-hour TTL is safe.
     """
-    Fetch course_id from the session then load the full course metadata.
-    Returns the course row dict: {id, name, persona, domain_topics, difficulty_descriptors}
-    """
+    cache_key = f"course:session:{session_id}"
+    try:
+        cached = _get_redis().get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except Exception:
+        pass  # Redis miss — fall through to DB
+
     course_id = await get_session_course_id(session_id)
-    return await get_course_info(course_id)
+    course = await get_course_info(course_id)
+
+    try:
+        _get_redis().setex(cache_key, _COURSE_CACHE_TTL, json.dumps(course, default=str))
+    except Exception:
+        pass  # Cache-write failure is non-fatal
+
+    return course
 
 
 # ---------------------------------------------------------------------------
 # Learn mode Celery task
 # ---------------------------------------------------------------------------
 
-async def _do_rag_turn(session_id: str, user_id: str, message: str, mode: str):
+async def _do_rag_turn(
+    session_id: str,
+    user_id: str,
+    message: str,
+    mode: str,
+    prefers_video: bool | None = None,  # M-17: passed from caller to skip duplicate DB fetch
+):
     total_start = time.monotonic()
 
     memory, course = await asyncio.gather(
@@ -76,7 +123,11 @@ async def _do_rag_turn(session_id: str, user_id: str, message: str, mode: str):
     ai_ms = int((time.monotonic() - ai_start) * 1000)
 
     tutor_text = result["response"]
-    response_format = await response_format_for_mode(session_id, mode)
+    # M-17: use the caller-supplied value if available; avoids a duplicate DB round-trip
+    if prefers_video is not None and mode != "review":
+        response_format = "video" if prefers_video else "text"
+    else:
+        response_format = await response_format_for_mode(session_id, mode)
 
     video_ms: int | None = None
     video_start = time.monotonic()
@@ -91,9 +142,7 @@ async def _do_rag_turn(session_id: str, user_id: str, message: str, mode: str):
         if delivery.get("response_format") == "video":
             video_ms = int((time.monotonic() - video_start) * 1000)
     except Exception as e:
-        import traceback
-        print(f"VIDEO GENERATION ERROR: {e}")
-        traceback.print_exc()
+        logger.error("Video generation error  session=%s: %s", session_id, e, exc_info=True)
         delivery = {"response_format": "text", "video_url": None, "audio_url": None}
 
     total_ms = int((time.monotonic() - total_start) * 1000)
@@ -129,12 +178,14 @@ def process_rag_turn_task(
     user_id: str,
     message: str,
     mode: str = "learn",
+    prefers_video: bool | None = None,  # M-17
 ):
     reset_async_supabase()
     try:
-        result = asyncio.run(_do_rag_turn(session_id, user_id, message, mode))
+        result = asyncio.run(_do_rag_turn(session_id, user_id, message, mode, prefers_video))
     except Exception as e:
-        result = {"status": "failed", "error": str(e)}
+        logger.exception("process_rag_turn_task failed  session=%s: %s", session_id, e)
+        result = {"status": "failed", "error": "Processing failed. Please try again."}
 
     _publish_to_ws(session_id, result)
     return result
@@ -297,10 +348,51 @@ def process_mode_session_start_task(
             )
         )
     except Exception as e:
-        result = {"status": "failed", "error": str(e)}
+        logger.exception("process_mode_session_start_task failed  session=%s: %s", session_id, e)
+        result = {"status": "failed", "error": "Processing failed. Please try again."}
 
     _publish_to_ws(session_id, result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Document ingestion Celery task
+# Runs on the dedicated ingestion_tasks queue (-c 1) so spaCy / unstructured
+# memory spikes are fully isolated from user-facing text and video workers.
+# ---------------------------------------------------------------------------
+
+@shared_task
+def process_ingestion_task(
+    document_id: str,
+    file_content_b64: str,   # base64-encoded file bytes (JSON-serialisable)
+    filename: str,
+    course_id: str,
+    doc_type: str,
+    default_mode: str,
+    difficulty: str,
+):
+    import base64
+    from app.ai.ingestion.service import process_document_background
+
+    file_content = base64.b64decode(file_content_b64)
+    reset_async_supabase()
+    try:
+        asyncio.run(
+            process_document_background(
+                document_id=document_id,
+                file_content=file_content,
+                filename=filename,
+                course_id=course_id,
+                doc_type=doc_type,
+                default_mode=default_mode,
+                difficulty=difficulty,
+            )
+        )
+    except Exception as e:
+        logger.exception(
+            "process_ingestion_task failed  doc=%s: %s", document_id, e
+        )
+    return {"document_id": document_id, "status": "complete"}
 
 
 # ---------------------------------------------------------------------------
@@ -604,7 +696,10 @@ def process_mode_session_turn_task(
             )
         )
     except Exception as e:
-        result = {"status": "failed", "error": str(e)}
+        logger.exception(
+            "process_mode_session_turn_task failed  mode_session=%s: %s", mode_session_id, e
+        )
+        result = {"status": "failed", "error": "Processing failed. Please try again."}
 
     _publish_to_ws(session_id, result)
     return result

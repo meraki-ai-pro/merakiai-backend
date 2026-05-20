@@ -16,6 +16,9 @@ from app.core.celery_app import celery_app
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
 
+# M-5: 25 MB cap on voice audio uploads
+_MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
 
 async def _set_session_mode(session_id: str, user_id: str, mode: str) -> None:
     """
@@ -81,8 +84,9 @@ async def rag_turn(
     queue    = "video_tasks" if prefers_video else "text_tasks"
     priority = 3             if prefers_video else 9
 
+    # M-17: pass prefers_video to avoid a duplicate DB lookup inside the Celery task
     task = process_rag_turn_task.apply_async(
-        args=[payload.session_id, user["id"], payload.message, "learn"],
+        args=[payload.session_id, user["id"], payload.message, "learn", prefers_video],
         queue=queue,
         priority=priority,
     )
@@ -111,7 +115,13 @@ async def rag_turn_voice(
     """
     Voice input for Learn mode: STT -> same /rag/turn logic.
     """
-    audio_bytes = await file.read()
+    # M-5: enforce size limit before reading the full file into memory
+    audio_bytes = await file.read(_MAX_AUDIO_BYTES + 1)
+    if len(audio_bytes) > _MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Audio file exceeds the 25 MB limit.",
+        )
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio upload")
 

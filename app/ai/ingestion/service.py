@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import logging
 
@@ -69,7 +70,7 @@ def _resolve_doc_type(doc_type: str | None) -> str:
 
 
 async def ingest_document(
-    file, course_id, doc_type, default_mode, difficulty, version, user_id, background_tasks
+    file, course_id, doc_type, default_mode, difficulty, version, user_id
 ):
     doc_type = _resolve_doc_type(doc_type)
     default_mode = _resolve_default_mode(default_mode, doc_type)
@@ -102,26 +103,32 @@ async def ingest_document(
     doc = doc_response.data[0]
     document_id = doc["id"]
 
-    # Read file content now because the stream might close after response
+    # Read file content now — the upload stream closes after the response
     file_content = await file.read()
     filename = file.filename
 
-    # Schedule background processing
-    background_tasks.add_task(
-        process_document_background,
-        document_id=document_id,
-        file_content=file_content,
-        filename=filename,
-        course_id=course_id,
-        doc_type=doc_type,
-        default_mode=default_mode,
-        difficulty=difficulty,
+    # Dispatch to the dedicated ingestion_tasks queue so spaCy / unstructured
+    # run in an isolated Celery worker, never inside the API process.
+    # File bytes are base64-encoded because Celery's JSON serialiser
+    # cannot handle raw bytes.
+    from app.ai.tasks import process_ingestion_task
+    process_ingestion_task.apply_async(
+        args=[
+            document_id,
+            base64.b64encode(file_content).decode(),
+            filename,
+            course_id,
+            doc_type,
+            default_mode,
+            difficulty,
+        ],
+        queue="ingestion_tasks",
     )
 
     return {
         "document_id": document_id,
         "status": "processing",
-        "message": "Document ingestion started in background.",
+        "message": "Document ingestion started.",
     }
 
 

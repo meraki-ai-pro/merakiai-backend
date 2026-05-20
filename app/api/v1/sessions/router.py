@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import auth_guard
 from app.db.supabase import get_user_client
@@ -129,8 +129,8 @@ def set_video_preference(session_id: str, payload: VideoToggle, user=Depends(aut
 @router.get("/{session_id}/conversations")
 def get_conversations(
     session_id: str,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),  # M-6: cap to prevent full-table dumps
+    offset: int = Query(0, ge=0),
     user=Depends(auth_guard),
 ):
     sid = _validate_uuid(session_id)

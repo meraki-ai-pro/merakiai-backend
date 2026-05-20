@@ -9,11 +9,6 @@ from openai import OpenAI
 
 from fastapi import HTTPException
 
-from app.config import load_env
-
-load_env()
-
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("Missing OPENAI_API_KEY")

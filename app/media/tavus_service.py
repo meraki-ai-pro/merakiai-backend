@@ -3,10 +3,6 @@ import time
 import requests
 from typing import Any, Dict, Optional
 
-from app.config import load_env
-
-load_env()
-
 TAVUS_API_KEY = os.getenv("TAVUS_API_KEY")
 TAVUS_DEFAULT_REPLICA_ID = os.getenv("TAVUS_DEFAULT_REPLICA_ID")
 

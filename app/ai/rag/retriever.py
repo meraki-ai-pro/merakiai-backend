@@ -8,7 +8,6 @@ from typing import List
 from openai import AsyncOpenAI
 from pinecone import Pinecone
 
-from app.config import load_env
 from app.db.supabase import get_async_supabase
 
 logger = logging.getLogger(__name__)
@@ -21,7 +20,6 @@ _pinecone_index = None
 def _get_openai() -> AsyncOpenAI:
     global _openai_client
     if _openai_client is None:
-        load_env()
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("Missing OPENAI_API_KEY environment variable.")
@@ -32,7 +30,6 @@ def _get_openai() -> AsyncOpenAI:
 def _get_pinecone_index():
     global _pinecone_index
     if _pinecone_index is None:
-        load_env()
         api_key = os.getenv("PINECONE_API_KEY")
         index_name = os.getenv("PINECONE_INDEX") or os.getenv("PINECONE_INDEX_NAME")
         if not api_key or not index_name:

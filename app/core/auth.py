@@ -1,20 +1,59 @@
+import logging
+import os
+from types import SimpleNamespace
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt as _jwt
 
-from app.db.supabase import get_supabase, get_user_client
+from app.db.supabase import get_user_client
+
+logger = logging.getLogger(__name__)
 
 security = HTTPBearer()
 
+# Algorithm is pinned to HS256 — never allow "none" or RS256 confusion attacks.
+_ALGORITHM = "HS256"
+
 
 def _validate_token(credentials: HTTPAuthorizationCredentials):
+    """Validate a Supabase JWT locally — no network round-trip required.
+
+    Requires SUPABASE_JWT_SECRET (found in Supabase Dashboard → Settings → API
+    → JWT Secret) to be present in the environment.
+    """
     token = credentials.credentials
+    secret = os.getenv("SUPABASE_JWT_SECRET", "")
+
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server authentication is not properly configured.",
+        )
+
     try:
-        user_response = get_supabase().auth.get_user(token)
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    if not user_response or not getattr(user_response, "user", None):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
-    return user_response.user
+        payload = _jwt.decode(
+            token,
+            secret,
+            algorithms=[_ALGORITHM],
+            options={"verify_aud": False},  # Supabase sets aud="authenticated"
+        )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+    user_id: str | None = payload.get("sub")
+    user_email: str = payload.get("email", "")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
+
+    return SimpleNamespace(id=user_id, email=user_email)
 
 
 async def admin_guard(credentials: HTTPAuthorizationCredentials = Depends(security)):
