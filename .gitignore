@@ -58,3 +58,12 @@ Thumbs.db
 alembic/versions/__pycache__/
 
 Frontend/
+
+.log
+.csv
+.claude/
+database schema.md
+FRONTEND_INTEGRATION_GUIDE.md
+Supabase *
+TECHNICAL_DOCUMENTATION.md
+triggers.csv
