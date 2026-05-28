@@ -1,8 +1,25 @@
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+# Support an explicit override via ENV_FILE (useful in systemd / CI).
+# Otherwise search for .env next to the project root first (local dev), then
+# one directory up (production layout: app cloned into /srv/meraki/merakiai-backend/
+# while .env lives at /srv/meraki/.env).
+def _find_env_file() -> Path:
+    explicit = os.getenv("ENV_FILE")
+    if explicit:
+        return Path(explicit)
+    # Local dev: <project_root>/.env  (parents[1] of app/config.py)
+    local = Path(__file__).resolve().parents[1] / ".env"
+    if local.exists():
+        return local
+    # Production: /srv/meraki/.env  (parents[2] of app/config.py)
+    return Path(__file__).resolve().parents[2] / ".env"
+
+
+_ENV_PATH = _find_env_file()
 
 
 def load_env() -> None:
