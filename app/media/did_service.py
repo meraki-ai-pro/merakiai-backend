@@ -123,7 +123,6 @@ def create_clip_async(
     presenter_id: str,
     audio_url: str,
     webhook_url: str,
-    webhook_secret: str | None = None,
     title: str | None = None,
     fluent: bool = True,
     stitch: bool = True,
@@ -135,9 +134,9 @@ def create_clip_async(
     Fire-and-forget variant: POST the clip to D-ID and return the clip_id immediately.
     D-ID will POST to webhook_url when processing is complete — no polling.
 
-    If webhook_secret is provided, D-ID will include it as
-    "Authorization: Bearer <secret>" in the webhook POST, allowing the handler
-    to verify the request is genuinely from D-ID.
+    Authentication of the callback is handled by embedding an HMAC-SHA256 token
+    in the webhook_url query string before calling this function. D-ID does NOT
+    support a webhook_secret payload field on the /clips endpoint.
 
     Webhook payload on completion:
       { "status": "done", "result_url": "...", "subtitles_url": "..." }
@@ -157,8 +156,6 @@ def create_clip_async(
         },
         "webhook": webhook_url,
     }
-    if webhook_secret:
-        payload["webhook_secret"] = webhook_secret
     if title:
         payload["title"] = title
 

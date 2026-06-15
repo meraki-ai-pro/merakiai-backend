@@ -13,6 +13,8 @@ Pass the webhook URL when creating a clip:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -50,23 +52,28 @@ async def did_webhook(session_id: str, request: Request):
     Expected payload:
         { "status": "done", "result_url": "...", "subtitles_url": "..." }
 
-    Security: D-ID sends the webhook_secret back as "Authorization: Bearer <secret>".
-    We also accept it via ?secret=<value> query param as a fallback.
+    Security: we embed an HMAC-SHA256(WEBHOOK_SECRET, session_id) token in the
+    webhook URL query string when registering with D-ID, then verify it here.
+    Constant-time comparison prevents timing side-channel attacks.
     """
     # C-3: auth is always enforced — 500 if WEBHOOK_SECRET is not set.
     webhook_secret = _get_webhook_secret()
 
-    # C-2: constant-time comparisons prevent timing side-channel attacks.
-    auth_header = request.headers.get("Authorization", "")
-    expected_header = f"Bearer {webhook_secret}"
-    query_secret = request.query_params.get("secret", "")
-
-    header_valid = _secrets.compare_digest(auth_header, expected_header)
-    query_valid = _secrets.compare_digest(query_secret, webhook_secret)
-
-    if not header_valid and not query_valid:
-        logger.warning("D-ID webhook rejected — invalid secret  session=%s", session_id)
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    # Primary: HMAC token in ?token= query param (set when registering the webhook URL).
+    token = request.query_params.get("token", "")
+    if token:
+        expected_token = hmac.new(
+            webhook_secret.encode(), session_id.encode(), hashlib.sha256
+        ).hexdigest()
+        if not _secrets.compare_digest(token, expected_token):
+            logger.warning("D-ID webhook rejected — invalid HMAC token  session=%s", session_id)
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    else:
+        # Fallback: legacy Bearer header (kept for backward compatibility).
+        auth_header = request.headers.get("Authorization", "")
+        if not _secrets.compare_digest(auth_header, f"Bearer {webhook_secret}"):
+            logger.warning("D-ID webhook rejected — invalid secret  session=%s", session_id)
+            raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
         payload = await request.json()

@@ -146,14 +146,21 @@ async def maybe_generate_video(
 
     try:
         if use_webhooks:
-            # Opt 3: fire-and-forget — worker task ends here, webhook delivers the video
-            webhook_url = f"{_PUBLIC_BASE_URL}/webhooks/did/{session_id}"
+            # Opt 3: fire-and-forget — worker task ends here, webhook delivers the video.
+            # D-ID /clips does not support webhook_secret in the payload, so we embed
+            # an HMAC-SHA256 token in the URL for callback authentication instead.
+            if _webhook_secret:
+                _did_token = hmac.new(
+                    _webhook_secret.encode(), session_id.encode(), hashlib.sha256
+                ).hexdigest()
+                webhook_url = f"{_PUBLIC_BASE_URL}/webhooks/did/{session_id}?token={_did_token}"
+            else:
+                webhook_url = f"{_PUBLIC_BASE_URL}/webhooks/did/{session_id}"
             clip_id = await asyncio.to_thread(
                 create_clip_async,
                 presenter_id=presenter_id,
                 audio_url=audio_url,
                 webhook_url=webhook_url,
-                webhook_secret=_webhook_secret or None,
                 title=f"{mode} response",
             )
             logger.info("D-ID clip submitted (webhook)  session=%s  clip_id=%s", session_id, clip_id)

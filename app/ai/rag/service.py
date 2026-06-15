@@ -1,8 +1,8 @@
-from typing import Any, Dict, List, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .retriever import retrieve_context
 from .prompt_builder import build_system_and_user
-from .claude import generate_response
+from .claude import generate_response, stream_response
 
 
 async def query_rag(
@@ -13,6 +13,7 @@ async def query_rag(
     course_domain_topics: List[str] = None,
     memory: List[str] = None,
     top_k: int = 5,
+    on_chunk: Optional[Callable[[str], None]] = None,
 ) -> Union[Dict[str, Any], Dict[str, str]]:
     """Full RAG pipeline for a single conversational turn.
 
@@ -48,5 +49,8 @@ async def query_rag(
         }
     ]
 
-    raw_output = await generate_response(prompt=user_text, mode=mode, system_parts=system_parts)
+    if on_chunk is not None:
+        raw_output = await stream_response(prompt=user_text, mode=mode, system_parts=system_parts, on_chunk=on_chunk)
+    else:
+        raw_output = await generate_response(prompt=user_text, mode=mode, system_parts=system_parts)
     return {"mode": mode, "response": raw_output.strip()}

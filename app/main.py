@@ -62,8 +62,9 @@ _vercel_origin_regex = (
 # L-2: Reject requests with unrecognised Host headers (Host-injection hardening).
 # Set ALLOWED_HOSTS in .env / AWS Secrets to a comma-separated list of your
 # real domain names (e.g. "api.yourdomain.com,localhost,127.0.0.1").
-# Defaults to localhost-only for local dev; "*" disables the check entirely.
-_raw_hosts = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1")
+# Default to "*" so LAN access via a machine IP works without needing
+# per-machine host allowlists.
+_raw_hosts = os.getenv("ALLOWED_HOSTS", "*")
 _allowed_hosts = [h.strip() for h in _raw_hosts.split(",") if h.strip()] or ["*"]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
 

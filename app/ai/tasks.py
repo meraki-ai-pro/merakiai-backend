@@ -108,6 +108,11 @@ async def _do_rag_turn(
         _load_course(session_id),
     )
 
+    _publish_to_ws(session_id, {"type": "text_stream_start"})
+
+    def _on_chunk(text: str) -> None:
+        _publish_to_ws(session_id, {"type": "text_chunk", "chunk": text})
+
     ai_start = time.monotonic()
     try:
         result = await query_rag(
@@ -117,9 +122,12 @@ async def _do_rag_turn(
             course_persona=course.get("persona"),
             course_domain_topics=course.get("domain_topics"),
             memory=memory,
+            on_chunk=_on_chunk,
         )
     except Exception as e:
-        return {"error": str(e), "status": "failed"}
+        error_result = {"error": str(e), "status": "failed"}
+        _publish_to_ws(session_id, error_result)
+        return error_result
     ai_ms = int((time.monotonic() - ai_start) * 1000)
 
     tutor_text = result["response"]
@@ -169,7 +177,9 @@ async def _do_rag_turn(
         video_generation_ms=video_ms,
     )
 
-    return {"mode": mode, "response": tutor_text, **delivery}
+    final_result = {"type": "response_complete", "mode": mode, "response": tutor_text, **delivery}
+    _publish_to_ws(session_id, final_result)
+    return final_result
 
 
 @shared_task
@@ -186,8 +196,8 @@ def process_rag_turn_task(
     except Exception as e:
         logger.exception("process_rag_turn_task failed  session=%s: %s", session_id, e)
         result = {"status": "failed", "error": "Processing failed. Please try again."}
+        _publish_to_ws(session_id, result)
 
-    _publish_to_ws(session_id, result)
     return result
 
 
