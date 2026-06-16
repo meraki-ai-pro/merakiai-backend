@@ -66,6 +66,10 @@ class SessionModeUpdate(BaseModel):
     current_mode: str = Field(..., max_length=50)  # learn|application|review
 
 
+class SessionTitleUpdate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+
+
 class UpdatePasswordPayload(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=128)
 

@@ -44,7 +44,6 @@ def create_tavus_video_from_audio(
     payload: Dict[str, Any] = {
         "replica_id": replica_id,
         "audio_url": audio_url,   # BYOA: bring-your-own-audio (ElevenLabs TTS)
-        "fast": True,             # faster rendering pipeline
     }
     if video_name:
         payload["video_name"] = video_name
@@ -106,7 +105,6 @@ def create_tavus_video_async(
         "replica_id": replica_id,
         "audio_url": audio_url,   # BYOA: bring-your-own-audio (ElevenLabs TTS)
         "callback_url": callback_url,
-        "fast": True,             # faster rendering pipeline (~30-60s vs 3-10min)
     }
     if video_name:
         payload["video_name"] = video_name

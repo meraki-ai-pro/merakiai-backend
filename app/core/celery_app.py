@@ -6,18 +6,16 @@ from app.config import load_env
 
 load_env()
 
-# L-5: never fall back to the well-known RabbitMQ default credentials.
-# Fail loudly at startup if the env var is missing so a misconfigured
-# production deployment is caught immediately rather than silently using
-# the insecure guest/guest account.
-rabbitmq_url = os.getenv("RABBITMQ_URL")
-if not rabbitmq_url:
-    raise RuntimeError(
-        "RABBITMQ_URL is not set. "
-        "Provide it via .env or AWS Secrets Manager (e.g. amqp://user:pass@host:5672//)."
-    )
-
+# Broker: prefer RABBITMQ_URL (production) → CELERY_BROKER_URL → Redis fallback.
+# This lets the Docker Compose setup use Redis for everything without a separate
+# RabbitMQ container, while production deployments can still use RabbitMQ.
 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+rabbitmq_url = (
+    os.getenv("RABBITMQ_URL")
+    or os.getenv("CELERY_BROKER_URL")
+    or redis_url.replace("/0", "/1")  # Redis DB 1 for broker
+)
 
 # ---------------------------------------------------------------------------
 # Priority queue definitions
@@ -71,10 +69,12 @@ task_queues = (
     ),
 )
 
+result_backend = os.getenv("CELERY_RESULT_BACKEND", redis_url)
+
 celery_app = Celery(
     "backend",
     broker=rabbitmq_url,
-    backend=redis_url,
+    backend=result_backend,
     include=["app.ai.tasks"],
 )
 

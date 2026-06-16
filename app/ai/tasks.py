@@ -57,6 +57,42 @@ def _publish_to_ws(session_id: str, result: dict) -> None:
         )
 
 
+async def _stream_mode_text(
+    session_id: str,
+    *,
+    mode: str,
+    message_type: str,
+    content: str,
+    step: int | None = None,
+    total_steps: int | None = None,
+) -> None:
+    """Stream validated practice/review display text to the UI."""
+    _publish_to_ws(
+        session_id,
+        {
+            "type": "mode_text_stream_start",
+            "mode": mode,
+            "message_type": message_type,
+            "step": step,
+            "total_steps": total_steps,
+        },
+    )
+
+    chunk = ""
+    for part in content.split(" "):
+        next_chunk = f"{part} "
+        if len(chunk) + len(next_chunk) > 48:
+            _publish_to_ws(session_id, {"type": "mode_text_chunk", "chunk": chunk})
+            await asyncio.sleep(0.01)
+            chunk = next_chunk
+        else:
+            chunk += next_chunk
+    if chunk:
+        _publish_to_ws(session_id, {"type": "mode_text_chunk", "chunk": chunk})
+
+    _publish_to_ws(session_id, {"type": "mode_text_stream_end"})
+
+
 # ---------------------------------------------------------------------------
 # Shared course-info loader with Redis cache (M-16)
 # session_id → course mapping is immutable; cache for 1 hour.
@@ -103,12 +139,19 @@ async def _do_rag_turn(
 ):
     total_start = time.monotonic()
 
-    memory, course = await asyncio.gather(
-        load_memory(session_id),
-        _load_course(session_id),
-    )
+    memory, course = await asyncio.gather(load_memory(session_id), _load_course(session_id))
 
-    _publish_to_ws(session_id, {"type": "text_stream_start"})
+    # Decide before LLM generation so video-preferring sessions do not stream
+    # a text answer into the UI before the video placeholder can be shown.
+    if prefers_video is not None and mode != "review":
+        response_format = "video" if prefers_video else "text"
+    else:
+        response_format = await response_format_for_mode(session_id, mode)
+
+    should_stream_text = response_format != "video"
+
+    if should_stream_text:
+        _publish_to_ws(session_id, {"type": "text_stream_start"})
 
     def _on_chunk(text: str) -> None:
         _publish_to_ws(session_id, {"type": "text_chunk", "chunk": text})
@@ -122,7 +165,7 @@ async def _do_rag_turn(
             course_persona=course.get("persona"),
             course_domain_topics=course.get("domain_topics"),
             memory=memory,
-            on_chunk=_on_chunk,
+            on_chunk=_on_chunk if should_stream_text else None,
         )
     except Exception as e:
         error_result = {"error": str(e), "status": "failed"}
@@ -131,11 +174,6 @@ async def _do_rag_turn(
     ai_ms = int((time.monotonic() - ai_start) * 1000)
 
     tutor_text = result["response"]
-    # M-17: use the caller-supplied value if available; avoids a duplicate DB round-trip
-    if prefers_video is not None and mode != "review":
-        response_format = "video" if prefers_video else "text"
-    else:
-        response_format = await response_format_for_mode(session_id, mode)
 
     video_ms: int | None = None
     video_start = time.monotonic()
@@ -238,6 +276,14 @@ async def _do_mode_session_start(
             difficulty_descriptors=difficulty_descriptors,
         )
         prompt_text = format_review_prompt(item)
+        await _stream_mode_text(
+            session_id,
+            mode="review",
+            message_type="prompt",
+            content=prompt_text,
+            step=1,
+            total_steps=10,
+        )
         ai_ms = int((time.monotonic() - ai_start) * 1000)
 
         supabase.table("session_state").upsert(
@@ -293,6 +339,14 @@ async def _do_mode_session_start(
         difficulty_descriptors=difficulty_descriptors,
     )
     prompt_text = format_application_prompt(scenario, step=1)
+    await _stream_mode_text(
+        session_id,
+        mode="application",
+        message_type="prompt",
+        content=prompt_text,
+        step=1,
+        total_steps=3,
+    )
     ai_ms = int((time.monotonic() - ai_start) * 1000)
 
     supabase.table("session_state").upsert(
@@ -464,6 +518,14 @@ async def _do_mode_session_turn(
             f"Score: {eval_out['score']}\n"
             f"Feedback: {eval_out['feedback']}"
         )
+        await _stream_mode_text(
+            session_id,
+            mode="application",
+            message_type="evaluation",
+            content=eval_out["feedback"],
+            step=step,
+            total_steps=total_steps,
+        )
 
         await log_conversation(
             session_id=session_id,
@@ -493,6 +555,14 @@ async def _do_mode_session_turn(
         if step < total_steps:
             next_step = step + 1
             next_prompt = format_application_prompt(pending_payload, next_step)
+            await _stream_mode_text(
+                session_id,
+                mode="application",
+                message_type="prompt",
+                content=next_prompt,
+                step=next_step,
+                total_steps=total_steps,
+            )
 
             supabase.table("session_state").update({"step": next_step}).eq(
                 "mode_session_id", mode_session_id
@@ -525,6 +595,14 @@ async def _do_mode_session_turn(
             "Key Learning Points: " + " | ".join(key_points)
             if key_points
             else "Application scenario completed."
+        )
+        await _stream_mode_text(
+            session_id,
+            mode="application",
+            message_type="completed",
+            content=key_text,
+            step=total_steps,
+            total_steps=total_steps,
         )
 
         await log_conversation(
@@ -576,6 +654,14 @@ async def _do_mode_session_turn(
         f"Score: {eval_out['score']}\n"
         f"Rubric: {eval_out.get('rubric_level', '')}\n"
         f"Feedback: {eval_out['feedback']}"
+    )
+    await _stream_mode_text(
+        session_id,
+        mode="review",
+        message_type="evaluation",
+        content=eval_out["feedback"],
+        step=current_item,
+        total_steps=total_items,
     )
 
     await log_conversation(
@@ -630,6 +716,14 @@ async def _do_mode_session_turn(
         difficulty_descriptors=difficulty_descriptors,
     )
     next_prompt = format_review_prompt(item2)
+    await _stream_mode_text(
+        session_id,
+        mode="review",
+        message_type="prompt",
+        content=next_prompt,
+        step=current_item + 1,
+        total_steps=total_items,
+    )
 
     supabase.table("session_state").upsert(
         {

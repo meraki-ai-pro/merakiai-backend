@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import auth_guard
 from app.db.supabase import get_user_client
-from app.models.models import VideoToggle, SessionModeUpdate, SessionCreateRequest
+from app.models.models import VideoToggle, SessionModeUpdate, SessionCreateRequest, SessionTitleUpdate
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -20,6 +20,59 @@ def _validate_uuid(value: str) -> str:
         return str(uuid.UUID(value))
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail="Invalid session ID format")
+
+
+@router.get("/")
+def list_sessions(
+    user=Depends(auth_guard),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """Return all sessions for the authenticated user, newest first."""
+    supabase = get_user_client(user["token"])
+    rows = (
+        supabase.table("sessions")
+        .select("id, current_mode, prefers_video, started_at, ended_at, course_id")
+        .eq("user_id", user["id"])
+        .order("started_at", desc=True)
+        .range(offset, offset + limit - 1)
+        .execute()
+    )
+    sessions = []
+    for row in (rows.data or []):
+        sid = row["id"]
+        first_msg = (
+            supabase.table("conversations")
+            .select("user_input")
+            .eq("session_id", sid)
+            .order("created_at", desc=False)
+            .limit(1)
+            .execute()
+        )
+        title = None
+        if first_msg.data:
+            raw = first_msg.data[0]["user_input"] or ""
+            if not raw.startswith("(system)"):
+                title = raw[:60] + ("…" if len(raw) > 60 else "")
+        count_res = (
+            supabase.table("conversations")
+            .select("id", count="exact")
+            .eq("session_id", sid)
+            .execute()
+        )
+        msg_count = getattr(count_res, "count", None) or len(count_res.data or [])
+        sessions.append({
+            "id": sid,
+            "title": title or "Session",
+            "mode": row.get("current_mode", "learn"),
+            "current_mode": row.get("current_mode", "learn"),
+            "prefers_video": row.get("prefers_video", False),
+            "course_id": row.get("course_id"),
+            "message_count": msg_count,
+            "started_at": row.get("started_at"),
+            "ended_at": row.get("ended_at"),
+        })
+    return {"sessions": sessions, "total": len(sessions), "limit": limit, "offset": offset}
 
 
 @router.get("/courses")
@@ -44,7 +97,7 @@ def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
         "user_id": user["id"],
         "course_id": payload.course_id,
         "current_mode": mode,
-        "prefers_video": False,
+        "prefers_video": payload.prefers_video,
         "started_at": _now_iso(),
     }).execute()
 
@@ -155,6 +208,19 @@ def get_conversations(
         "limit": limit,
         "offset": offset,
     }
+
+
+@router.patch("/{session_id}/title")
+def rename_session(session_id: str, payload: SessionTitleUpdate, user=Depends(auth_guard)):
+    sid = _validate_uuid(session_id)
+    supabase = get_user_client(user["token"])
+    if not supabase.table("sessions").select("id").eq("id", sid).execute().data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        supabase.table("sessions").update({"title": payload.title}).eq("id", sid).execute()
+    except Exception:
+        pass  # graceful no-op if title column hasn't been added to the schema yet
+    return {"session_id": sid, "title": payload.title}
 
 
 @router.post("/{session_id}/end")

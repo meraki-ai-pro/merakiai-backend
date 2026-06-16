@@ -11,6 +11,11 @@ from app.db.supabase import get_supabase
 from app.media.text_cleaner import clean_for_tts
 from app.media.tts_service import tts_to_mp3_bytes
 from app.media.storage_service import upload_audio_and_get_url
+from app.media.did_agent_service import (
+    DidAgentError,
+    get_cached_stream,
+    speak as did_agent_speak,
+)
 from app.media.did_service import create_clip_async, create_clip_from_audio, DidError
 from app.media.tavus_service import create_tavus_video_async, create_tavus_video_from_audio, TavusError
 from app.utils.srt_vtt import convert_srt_to_vtt
@@ -134,46 +139,66 @@ async def maybe_generate_video(
             detail=f"Invalid audio_url generated: {audio_url!r}",
         )
 
+    # ── D-ID Agents real-time path (preferred when frontend has an active stream) ──
+    stream_info = get_cached_stream(session_id)
+    if stream_info:
+        try:
+            await asyncio.to_thread(
+                did_agent_speak,
+                stream_info["agent_id"],
+                stream_info["stream_id"],
+                audio_url=audio_url,
+                did_session_id=stream_info["did_session_id"],
+            )
+            logger.info(
+                "D-ID agent speak dispatched  session=%s  stream=%s",
+                session_id, stream_info["stream_id"],
+            )
+            return {
+                "response_format": "video",
+                "audio_url": audio_url,
+                "video_url": None,          # video delivered via live WebRTC stream
+                "subtitle_url": "",
+                "source": "did_agent",
+                "streaming": True,
+            }
+        except DidAgentError as exc:
+            logger.warning(
+                "D-ID agent speak failed: %s — falling back to Tavus", exc
+            )
+    # ─────────────────────────────────────────────────────────────────────────
+
     use_webhooks = bool(_PUBLIC_BASE_URL)
     _webhook_secret = os.getenv("WEBHOOK_SECRET", "")
 
-    # ── Try D-ID (primary) ───────────────────────────────────────────────────
-    logger.info("Creating D-ID clip  session=%s  presenter=%s  webhooks=%s",
-                session_id, presenter_id, use_webhooks)
-
-    clip = None
-    use_tavus = False
-
+    # ── D-ID /clips async path (no WebRTC stream; generates a video file URL) ─
     try:
         if use_webhooks:
-            # Opt 3: fire-and-forget — worker task ends here, webhook delivers the video.
-            # D-ID /clips does not support webhook_secret in the payload, so we embed
-            # an HMAC-SHA256 token in the URL for callback authentication instead.
             if _webhook_secret:
                 _did_token = hmac.new(
                     _webhook_secret.encode(), session_id.encode(), hashlib.sha256
                 ).hexdigest()
-                webhook_url = f"{_PUBLIC_BASE_URL}/webhooks/did/{session_id}?token={_did_token}"
+                _webhook_url = f"{_PUBLIC_BASE_URL}/webhooks/did/{session_id}?token={_did_token}"
             else:
-                webhook_url = f"{_PUBLIC_BASE_URL}/webhooks/did/{session_id}"
+                _webhook_url = f"{_PUBLIC_BASE_URL}/webhooks/did/{session_id}"
             clip_id = await asyncio.to_thread(
                 create_clip_async,
                 presenter_id=presenter_id,
                 audio_url=audio_url,
-                webhook_url=webhook_url,
+                webhook_url=_webhook_url,
                 title=f"{mode} response",
             )
             logger.info("D-ID clip submitted (webhook)  session=%s  clip_id=%s", session_id, clip_id)
             return {
                 "response_format": "video",
                 "audio_url": audio_url,
-                "video_url": None,        # delivered via webhook when ready
+                "video_url": None,
                 "subtitle_url": "",
                 "clip_id": clip_id,
                 "pending": True,
+                "source": "did_clips",
             }
         else:
-            # Fallback: blocking poll (used when PUBLIC_BASE_URL is not set)
             clip = await asyncio.to_thread(
                 create_clip_from_audio,
                 presenter_id=presenter_id,
@@ -181,82 +206,71 @@ async def maybe_generate_video(
                 title=f"{mode} response",
                 timeout_seconds=360,
             )
-    except Exception as e:
-        logger.warning("D-ID generation failed: %s. Falling back to Tavus...", e)
-        use_tavus = True
+            video_url = (
+                clip.get("result_url") or clip.get("resultUrl")
+                or clip.get("url") or clip.get("result")
+            )
+            subtitle_url = clip.get("subtitles_url")
+            vtt_data = convert_srt_to_vtt(subtitle_url) if subtitle_url else ""
+            logger.info("D-ID clip ready (poll)  session=%s  url=%s", session_id, video_url)
+            return {
+                "response_format": "video",
+                "audio_url": audio_url,
+                "video_url": video_url,
+                "subtitle_url": vtt_data,
+                "source": "did_clips",
+            }
+    except DidError as clips_err:
+        logger.warning("D-ID clips failed: %s — falling back to Tavus", clips_err)
 
-    # ── Tavus fallback ───────────────────────────────────────────────────────
-    if use_tavus:
-        env_var_name = f"TAVUS_{avatar_id.upper()}_REPLICA_ID"
-        replica_id = os.getenv(env_var_name) or os.getenv("TAVUS_DEFAULT_REPLICA_ID", "")
+    # ── Tavus fallback (ultimate fallback) ───────────────────────────────────
+    logger.info("Falling back to Tavus  session=%s  webhooks=%s", session_id, use_webhooks)
+    env_var_name = f"TAVUS_{avatar_id.upper()}_REPLICA_ID"
+    replica_id = os.getenv(env_var_name) or os.getenv("TAVUS_DEFAULT_REPLICA_ID", "")
 
-        try:
-            if use_webhooks:
-                # Opt 3: fire-and-forget
-                # M-7: pass an HMAC-SHA256 token instead of the raw secret so the
-                # secret is never visible in URL logs or server-side access logs.
-                if _webhook_secret:
-                    _token = hmac.new(
-                        _webhook_secret.encode(), session_id.encode(), hashlib.sha256
-                    ).hexdigest()
-                    callback_url = f"{_PUBLIC_BASE_URL}/webhooks/tavus/{session_id}?token={_token}"
-                else:
-                    callback_url = f"{_PUBLIC_BASE_URL}/webhooks/tavus/{session_id}"
-                video_id = await asyncio.to_thread(
-                    create_tavus_video_async,
-                    replica_id=replica_id,
-                    audio_url=audio_url,
-                    callback_url=callback_url,
-                    video_name=f"{mode} fallback response",
-                )
-                logger.info("Tavus video submitted (webhook)  session=%s  video_id=%s",
-                            session_id, video_id)
-                return {
-                    "response_format": "video",
-                    "audio_url": audio_url,
-                    "video_url": None,    # delivered via webhook when ready
-                    "subtitle_url": "",
-                    "video_id": video_id,
-                    "pending": True,
-                    "source": "tavus",
-                }
+    try:
+        if use_webhooks:
+            if _webhook_secret:
+                _token = hmac.new(
+                    _webhook_secret.encode(), session_id.encode(), hashlib.sha256
+                ).hexdigest()
+                callback_url = f"{_PUBLIC_BASE_URL}/webhooks/tavus/{session_id}?token={_token}"
             else:
-                # Fallback: blocking poll
-                tavus_video = await asyncio.to_thread(
-                    create_tavus_video_from_audio,
-                    replica_id=replica_id,
-                    audio_url=audio_url,
-                    video_name=f"{mode} fallback response",
-                )
-                video_url = tavus_video.get("download_url") or tavus_video.get("hosted_url")
-                logger.info("Tavus fallback video ready (poll). URL: %s", video_url)
-                return {
-                    "response_format": "video",
-                    "audio_url": audio_url,
-                    "video_url": video_url,
-                    "subtitle_url": "",
-                    "did_payload": tavus_video,
-                }
-        except Exception as tavus_err:
-            logger.error("Tavus fallback also failed: %s", tavus_err)
-            # Both providers failed — return text gracefully
-            return {"response_format": "text", "video_url": None, "audio_url": audio_url}
-
-    # ── D-ID polling success path ────────────────────────────────────────────
-    video_url = (
-        clip.get("result_url")
-        or clip.get("resultUrl")
-        or clip.get("url")
-        or clip.get("result")
-    )
-    subtitle_url = clip.get("subtitles_url")
-    vtt_data = convert_srt_to_vtt(subtitle_url) if subtitle_url else ""
-    logger.info("D-ID video ready (poll). Subtitles: %s", bool(subtitle_url))
-
-    return {
-        "response_format": "video",
-        "audio_url": audio_url,
-        "video_url": video_url,
-        "subtitle_url": vtt_data,
-        "did_payload": clip,
-    }
+                callback_url = f"{_PUBLIC_BASE_URL}/webhooks/tavus/{session_id}"
+            video_id = await asyncio.to_thread(
+                create_tavus_video_async,
+                replica_id=replica_id,
+                audio_url=audio_url,
+                callback_url=callback_url,
+                video_name=f"{mode} response",
+            )
+            logger.info("Tavus video submitted (webhook)  session=%s  video_id=%s",
+                        session_id, video_id)
+            return {
+                "response_format": "video",
+                "audio_url": audio_url,
+                "video_url": None,
+                "subtitle_url": "",
+                "video_id": video_id,
+                "pending": True,
+                "source": "tavus",
+            }
+        else:
+            tavus_video = await asyncio.to_thread(
+                create_tavus_video_from_audio,
+                replica_id=replica_id,
+                audio_url=audio_url,
+                video_name=f"{mode} response",
+            )
+            video_url = tavus_video.get("download_url") or tavus_video.get("hosted_url")
+            logger.info("Tavus video ready (poll). URL: %s", video_url)
+            return {
+                "response_format": "video",
+                "audio_url": audio_url,
+                "video_url": video_url,
+                "subtitle_url": "",
+                "source": "tavus",
+            }
+    except Exception as tavus_err:
+        logger.error("Tavus video generation failed: %s", tavus_err)
+        return {"response_format": "text", "video_url": None, "audio_url": audio_url}

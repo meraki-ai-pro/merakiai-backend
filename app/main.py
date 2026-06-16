@@ -28,6 +28,7 @@ from app.api.v1.ws.router import router as ws_router
 from app.api.v1.webhooks.did import router as did_webhook_router
 from app.api.v1.webhooks.tavus import router as tavus_webhook_router
 from app.api.v1.admin.router import router as admin_router
+from app.api.v1.video.router import router as video_router
 
 
 @asynccontextmanager
@@ -111,3 +112,4 @@ app.include_router(ws_router)
 app.include_router(did_webhook_router)
 app.include_router(tavus_webhook_router)
 app.include_router(admin_router)
+app.include_router(video_router)
