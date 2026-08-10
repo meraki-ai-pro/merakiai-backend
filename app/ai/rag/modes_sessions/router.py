@@ -6,6 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from celery.result import AsyncResult
 
 from app.core.auth import auth_guard
+from app.core.enrolment import (
+    PARTICIPATING_STATUSES,
+    require_enrolment,
+    require_mode_enabled,
+)
 from app.core.rate_limit import rate_limit
 from app.db.supabase import get_user_client
 from app.media.stt_service import transcribe_audio
@@ -23,7 +28,8 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _ensure_chat_session_ownership(supabase, session_id: str, user_id: str):
+def _ensure_chat_session_ownership(supabase, session_id: str, user_id: str) -> str:
+    """Validate the session and return its course_id."""
     # Sessions must be pre-created with a course_id — never auto-create here.
     try:
         UUID(str(session_id))
@@ -33,8 +39,10 @@ def _ensure_chat_session_ownership(supabase, session_id: str, user_id: str):
     s = supabase.table("sessions").select("course_id").eq("id", session_id).execute()
     if not s.data:
         raise HTTPException(status_code=404, detail="Session not found. Create one via POST /sessions/")
-    if not s.data[0].get("course_id"):
+    course_id = s.data[0].get("course_id")
+    if not course_id:
         raise HTTPException(status_code=400, detail="Session has no course assigned. Re-create via POST /sessions/")
+    return course_id
 
 
 def _ensure_mode_session_ownership(supabase, mode_session_id: str, user_id: str):
@@ -105,7 +113,12 @@ async def start_mode_session(
     if mode not in ("application", "review"):
         raise HTTPException(status_code=400, detail="mode must be application or review")
 
-    _ensure_chat_session_ownership(supabase, payload.session_id, user["id"])
+    course_id = _ensure_chat_session_ownership(supabase, payload.session_id, user["id"])
+
+    # Permission stack steps 3 and 4. Application mode is opt-out per course,
+    # so this is the gate the lecturer's practice_mode_enabled flag acts on.
+    require_enrolment(user, course_id, PARTICIPATING_STATUSES)
+    require_mode_enabled(course_id, mode)
 
     ms = (
         supabase.table("mode_sessions")
@@ -152,6 +165,14 @@ async def mode_session_turn(
 
     ms = _ensure_mode_session_ownership(supabase, mode_session_id, user["id"])
     session_id = ms["session_id"]
+
+    # Re-checked per turn so a withdrawal takes effect mid-session rather than
+    # at next login. Uses ACTIVE_STATUSES, not PARTICIPATING: a student whose
+    # enrolment completed part-way through a practice set should be allowed to
+    # finish it rather than losing their progress at the last question.
+    course_id = _ensure_chat_session_ownership(supabase, session_id, user["id"])
+    require_enrolment(user, course_id)
+
     mode = ms["mode"]
     stype = ms["session_type"]
     difficulty = ms["difficulty"]

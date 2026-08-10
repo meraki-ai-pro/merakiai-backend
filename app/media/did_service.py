@@ -1,24 +1,29 @@
 # app/media/did_service.py
 from __future__ import annotations
 
-import os
 import time
 import requests
 from typing import Any, Dict, Optional
 
-DID_API_KEY = os.getenv("DID_API_KEY")
-if not DID_API_KEY:
-    raise RuntimeError("Missing DID_API_KEY")
+from app.core.media_config import get_key
 
 # IMPORTANT: V3 Pro Avatars use /clips
 DID_BASE_URL = "https://api.d-id.com"
 CLIPS_URL = f"{DID_BASE_URL}/clips"
 
-HEADERS = {
-    "accept": "application/json",
-    "content-type": "application/json",
-    "authorization": f"Basic {DID_API_KEY}",
-}
+
+def _headers() -> Dict[str, str]:
+    """Build request headers with the current D-ID key (read at call time so
+    an admin-rotated key takes effect without a restart)."""
+    api_key = get_key("DID_API_KEY")
+    if not api_key:
+        raise DidError("Missing DID_API_KEY")
+    return {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "authorization": f"Basic {api_key}",
+    }
+
 
 class DidError(RuntimeError):
     pass
@@ -62,7 +67,7 @@ def create_clip_from_audio(
     if title:
         payload["title"] = title
 
-    r = requests.post(CLIPS_URL, json=payload, headers=HEADERS, timeout=60)
+    r = requests.post(CLIPS_URL, json=payload, headers=_headers(), timeout=60)
     if r.status_code >= 400:
         raise DidError(f"D-ID API error [{r.status_code}]: {r.json() if _is_json(r) else r.text}\n"
                        f"Request payload: {payload}")
@@ -98,7 +103,7 @@ def wait_for_clip_result(
     last_payload: Optional[Dict[str, Any]] = None
 
     while time.time() < deadline:
-        r = requests.get(status_url, headers=HEADERS, timeout=60)
+        r = requests.get(status_url, headers=_headers(), timeout=60)
         if r.status_code >= 400:
             raise DidError(f"D-ID status error [{r.status_code}]: {r.text}")
 
@@ -159,7 +164,7 @@ def create_clip_async(
     if title:
         payload["title"] = title
 
-    r = requests.post(CLIPS_URL, json=payload, headers=HEADERS, timeout=60)
+    r = requests.post(CLIPS_URL, json=payload, headers=_headers(), timeout=60)
     if r.status_code >= 400:
         raise DidError(
             f"D-ID API error [{r.status_code}]: {r.json() if _is_json(r) else r.text}"

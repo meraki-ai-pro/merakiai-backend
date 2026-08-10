@@ -37,6 +37,18 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "temperature": 0.2,
         "max_tokens": 700,
     },
+    # Manim scene generation. Deliberately NOT reusing "learn": a chat answer
+    # fits in 1000 tokens, a Manim scene does not, and a scene truncated
+    # mid-statement fails to parse rather than degrading gracefully.
+    #
+    # Low temperature because this is code — mathematical accuracy matters far
+    # more than variety, and Proposal §10 names notation errors as the risk
+    # that would actually damage the pilot.
+    "scene_generation": {
+        "model": "claude-opus-4-6",
+        "temperature": 0.2,
+        "max_tokens": 8000,
+    },
 }
 
 

@@ -30,6 +30,7 @@ rabbitmq_url = (
 _text_exchange      = Exchange("text_tasks",      type="direct")
 _video_exchange     = Exchange("video_tasks",     type="direct")
 _ingestion_exchange = Exchange("ingestion_tasks", type="direct")
+_render_exchange    = Exchange("render_tasks",    type="direct")
 _dlx_exchange       = Exchange("dlx",             type="direct")
 
 task_queues = (
@@ -61,6 +62,18 @@ task_queues = (
             "x-dead-letter-exchange": "dlx",
         },
     ),
+    Queue(
+        "render_tasks",
+        _render_exchange,
+        routing_key="render",
+        # Manim/Remotion renders take minutes and must never share a worker
+        # with a student turn. This queue is consumed only by the dedicated
+        # render container, which carries LaTeX, cairo and ffmpeg and runs
+        # model-generated code — see render.Dockerfile.
+        queue_arguments={
+            "x-dead-letter-exchange": "dlx",
+        },
+    ),
     # Dead Letter Queue — receives tasks that fail or expire
     Queue(
         "dead_letter",
@@ -71,11 +84,26 @@ task_queues = (
 
 result_backend = os.getenv("CELERY_RESULT_BACKEND", redis_url)
 
+# Which task modules this process imports at startup.
+#
+# The render worker sets CELERY_INCLUDE=app.media.render.tasks so it does NOT
+# import app.ai.tasks — that module pulls in video_service (ElevenLabs, D-ID,
+# Tavus) and the RAG service (Pinecone, OpenAI), none of which a render needs.
+# Keeping them out halves the image and, more importantly, means those client
+# libraries are not present in the container that executes generated code.
+#
+# Dispatch does not require the import: the API sends render jobs by task name.
+_include = [
+    module.strip()
+    for module in os.getenv("CELERY_INCLUDE", "app.ai.tasks").split(",")
+    if module.strip()
+]
+
 celery_app = Celery(
     "backend",
     broker=rabbitmq_url,
     backend=result_backend,
-    include=["app.ai.tasks"],
+    include=_include,
 )
 
 celery_app.conf.update(
@@ -101,5 +129,6 @@ celery_app.conf.update(
         "app.ai.tasks.process_mode_session_start_task": {"queue": "text_tasks"},
         "app.ai.tasks.process_mode_session_turn_task":  {"queue": "text_tasks"},
         "app.ai.tasks.process_ingestion_task":          {"queue": "ingestion_tasks"},
+        "app.media.render.tasks.process_render_task":   {"queue": "render_tasks"},
     },
 )

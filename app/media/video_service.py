@@ -27,6 +27,26 @@ logger = logging.getLogger(__name__)
 # If unset, falls back to polling mode for safety.
 _PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
+# D-ID Agents streaming hard-rejects audio longer than 90s. This is a safety
+# net on top of the concise video prompt: cap the spoken text well under that
+# so speak() never fails with InvalidAudioFileDurationError. ~1500 chars is
+# roughly 55-65s of TTS speech, leaving comfortable margin.
+_MAX_SPEECH_CHARS = int(os.getenv("VIDEO_MAX_SPEECH_CHARS", "1500"))
+
+
+def _clamp_for_speech(text: str) -> str:
+    """Trim spoken text to stay under D-ID's 90s audio limit, on a clean boundary."""
+    if len(text) <= _MAX_SPEECH_CHARS:
+        return text
+    head = text[:_MAX_SPEECH_CHARS]
+    # Prefer to end on a sentence boundary within the budget.
+    cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "), head.rfind("\n"))
+    if cut < _MAX_SPEECH_CHARS * 0.5:
+        cut = head.rfind(" ")  # no sentence break — fall back to a word boundary
+    if cut <= 0:
+        cut = _MAX_SPEECH_CHARS
+    return text[: cut + 1].strip()
+
 
 async def maybe_generate_video(
     *,
@@ -90,6 +110,10 @@ async def maybe_generate_video(
 
     if not clean:
         return {"response_format": "text", "video_url": None, "audio_url": None}
+
+    # Safety net: keep spoken audio under D-ID's 90s cap (the concise video
+    # prompt already targets ~150 words; this guards against outliers).
+    clean = _clamp_for_speech(clean)
 
     # ── Opt 4: fetch bundle concurrently while TTS is pending ────────────────
     # Bundle fetch can start immediately since we now have avatar_id.

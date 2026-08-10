@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
-from app.core.auth import auth_guard, security
+from app.core.auth import auth_guard, require_mfa_if_enrolled, security
 from app.core.rate_limit import rate_limit
 from app.db.supabase import get_supabase, get_supabase_anon
 from app.models.models import ForgotPasswordPayload, LoginPayload, SignUpPayload, UpdatePasswordPayload
@@ -219,7 +219,10 @@ def logout(
 
 
 @router.post("/update-password")
-def update_password(payload: UpdatePasswordPayload, user=Depends(auth_guard)):
+def update_password(
+    payload: UpdatePasswordPayload,
+    user=Depends(require_mfa_if_enrolled),
+):
     if not payload.new_password or len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     try:

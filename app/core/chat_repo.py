@@ -141,8 +141,15 @@ async def log_conversation(
     response_format: str,
     video_url: Optional[str] = None,
     audio_url: Optional[str] = None,
+    sources: Optional[list] = None,
+    attachments: Optional[list] = None,
 ) -> None:
-    """Log conversation turn to database."""
+    """Log conversation turn to database.
+
+    ``sources`` is stored as an immutable snapshot of what the answer was
+    grounded in. Without it a reloaded conversation shows [1][2] markers as
+    inert text — the citation UI degrades to noise on every refresh.
+    """
     supabase = await get_async_supabase()
     payload = {
         "session_id": session_id,
@@ -154,4 +161,27 @@ async def log_conversation(
         "video_url": video_url,
         "audio_url": audio_url,
     }
-    await supabase.table("conversations").insert(payload).execute()
+
+    # Written on a retry rather than in the first insert so the turn is still
+    # recorded on a database that predates
+    # add_conversation_sources_and_file_retention.sql. Losing the transcript
+    # would be far worse than losing its citations.
+    optional = {}
+    if sources:
+        optional["sources"] = sources
+    if attachments:
+        optional["attachments"] = attachments
+
+    if not optional:
+        await supabase.table("conversations").insert(payload).execute()
+        return
+
+    try:
+        await supabase.table("conversations").insert({**payload, **optional}).execute()
+    except Exception as exc:  # noqa: BLE001 — columns may not exist yet
+        logger.warning(
+            "Conversation insert rejected sources/attachments; storing the turn "
+            "without them. Apply add_conversation_sources_and_file_retention.sql: %s",
+            exc,
+        )
+        await supabase.table("conversations").insert(payload).execute()

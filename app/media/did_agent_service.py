@@ -29,14 +29,17 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-DID_API_KEY = os.getenv("DID_API_KEY", "")
 DID_BASE_URL = os.getenv("DID_BASE_URL", "https://api.d-id.com")
 
-_HEADERS = {
-    "accept": "application/json",
-    "content-type": "application/json",
-    "authorization": f"Basic {DID_API_KEY}",
-}
+
+def _headers() -> dict:
+    """D-ID auth headers built at call time so a rotated key applies live."""
+    from app.core.media_config import get_key
+    return {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "authorization": f"Basic {get_key('DID_API_KEY') or ''}",
+    }
 
 _AGENT_CACHE_TTL = 7 * 24 * 3600   # 7 days — agents persist in D-ID account
 _STREAM_CACHE_TTL = 3600            # 1 hour — stream session lifetime
@@ -98,7 +101,8 @@ def _create_agent(presenter_id: str) -> str:
     The LLM is required by D-ID but is bypassed when using speak() with
     pre-generated ElevenLabs audio — only the avatar renderer is used.
     """
-    openai_key = os.getenv("OPENAI_API_KEY", "")
+    from app.core.media_config import get_key
+    openai_key = get_key("OPENAI_API_KEY") or ""
 
     payload: Dict[str, Any] = {
         "presenter": {
@@ -118,7 +122,7 @@ def _create_agent(presenter_id: str) -> str:
     r = requests.post(
         f"{DID_BASE_URL}/agents",
         json=payload,
-        headers=_HEADERS,
+        headers=_headers(),
         timeout=30,
     )
     if r.status_code >= 400:
@@ -167,7 +171,7 @@ def create_stream(
     r = requests.post(
         f"{DID_BASE_URL}/agents/{agent_id}/streams",
         json=payload,
-        headers=_HEADERS,
+        headers=_headers(),
         timeout=30,
     )
     if r.status_code >= 400:
@@ -232,7 +236,7 @@ def submit_sdp_answer(
     r = requests.post(
         f"{DID_BASE_URL}/agents/{agent_id}/streams/{stream_id}/sdp",
         json=payload,
-        headers=_HEADERS,
+        headers=_headers(),
         timeout=15,
     )
     if r.status_code >= 400:
@@ -268,7 +272,7 @@ def submit_ice_candidate(
     r = requests.post(
         f"{DID_BASE_URL}/agents/{agent_id}/streams/{stream_id}/ice",
         json=payload,
-        headers=_HEADERS,
+        headers=_headers(),
         timeout=15,
     )
     if r.status_code >= 400:
@@ -303,7 +307,7 @@ def speak(
     r = requests.post(
         f"{DID_BASE_URL}/agents/{agent_id}/streams/{stream_id}",
         json=payload,
-        headers=_HEADERS,
+        headers=_headers(),
         timeout=30,
     )
     if r.status_code >= 400:
@@ -328,7 +332,7 @@ def close_stream(agent_id: str, stream_id: str, did_session_id: str) -> None:
         r = requests.delete(
             f"{DID_BASE_URL}/agents/{agent_id}/streams/{stream_id}",
             json={"session_id": did_session_id},
-            headers=_HEADERS,
+            headers=_headers(),
             timeout=10,
         )
         if r.status_code >= 400:

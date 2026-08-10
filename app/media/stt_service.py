@@ -9,11 +9,22 @@ from openai import OpenAI
 
 from fastapi import HTTPException
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Missing OPENAI_API_KEY")
+# L-9 style lazy init: build the client on first use and rebuild if an admin
+# rotates the OpenAI key. Keeps the module importable without the key present.
+_client: OpenAI | None = None
+_client_key: str | None = None
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+
+def _get_client() -> OpenAI:
+    global _client, _client_key
+    from app.core.media_config import get_key
+    api_key = get_key("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY")
+    if _client is None or api_key != _client_key:
+        _client = OpenAI(api_key=api_key)
+        _client_key = api_key
+    return _client
 
 # Choose your model (Whisper via OpenAI hosted)
 DEFAULT_STT_MODEL = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
@@ -58,7 +69,7 @@ def transcribe_audio(audio_bytes: bytes, filename: Optional[str] = None) -> str:
             # )
 
             # Option B: More general "transcribe"
-            result = client.audio.transcriptions.create(
+            result = _get_client().audio.transcriptions.create(
                 model=DEFAULT_STT_MODEL,
                 file=f,
             )

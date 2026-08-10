@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from app.core.chat_repo import (
 )
 from app.ai.rag.service import query_rag
 from app.media.video_service import maybe_generate_video
+from app.media.storage_service import STUDENT_UPLOADS_BUCKET, upload_student_image
 from app.db.supabase import get_supabase, reset_async_supabase
 from app.core import analytics
 
@@ -55,6 +57,16 @@ def _publish_to_ws(session_id: str, result: dict) -> None:
         logger.error(
             "Failed to publish WS result  session=%s  error=%s", session_id, exc
         )
+
+
+def _board_enabled() -> bool:
+    """Lesson-board presentation for Learn answers. Set LESSON_BOARD=0 to disable."""
+    return os.getenv("LESSON_BOARD", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def _publish_status(session_id: str, stage: str, label: str) -> None:
+    """Emit a progress event that drives the "what's happening" panel in the UI."""
+    _publish_to_ws(session_id, {"type": "status", "stage": stage, "label": label})
 
 
 async def _stream_mode_text(
@@ -130,31 +142,87 @@ async def _load_course(session_id: str) -> dict:
 # Learn mode Celery task
 # ---------------------------------------------------------------------------
 
+async def _retain_attachments(
+    user_id: str, session_id: str, images: list | None
+) -> list | None:
+    """Archive submitted photos and return what to store on the conversation.
+
+    Only the storage path is kept, never the base64 — a handful of those on one
+    row would bloat the conversation table enormously and it is already in
+    object storage. The client mints a signed URL when it needs to display one.
+
+    Uploads run concurrently; one failure drops that image from the record
+    rather than failing the turn, which has already been answered by this point.
+    """
+    if not images:
+        return None
+
+    results = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                upload_student_image,
+                user_id,
+                session_id,
+                base64.b64decode(img["data"]),
+                img["media_type"],
+            )
+            for img in images
+        ],
+        return_exceptions=True,
+    )
+
+    stored = [
+        {"bucket": STUDENT_UPLOADS_BUCKET, "path": path, "media_type": img["media_type"]}
+        for img, path in zip(images, results)
+        if isinstance(path, str) and path
+    ]
+    return stored or None
+
+
 async def _do_rag_turn(
     session_id: str,
     user_id: str,
     message: str,
     mode: str,
     prefers_video: bool | None = None,  # M-17: passed from caller to skip duplicate DB fetch
+    images: list | None = None,
 ):
     total_start = time.monotonic()
 
     memory, course = await asyncio.gather(load_memory(session_id), _load_course(session_id))
 
-    # Decide before LLM generation so video-preferring sessions do not stream
-    # a text answer into the UI before the video placeholder can be shown.
     if prefers_video is not None and mode != "review":
         response_format = "video" if prefers_video else "text"
     else:
         response_format = await response_format_for_mode(session_id, mode)
 
-    should_stream_text = response_format != "video"
+    # Feedback on a photograph is inherently visual — "your sign flips on line
+    # three" only lands next to the working it refers to. An avatar narrating
+    # it while the student stares at a talking head is the wrong medium, so an
+    # image turn always answers on the board regardless of video preference.
+    if images:
+        response_format = "text"
+
+    # Stream the text answer for BOTH text and video responses. In video mode
+    # the persistent live avatar speaks in parallel, so streaming the transcript
+    # lets the student start reading in ~2-3s instead of waiting the full
+    # generate + TTS + avatar-render pipeline.
+    should_stream_text = True
+
+    def _on_progress(stage: str, label: str) -> None:
+        # Drives the "what's happening" progress panel in the UI.
+        _publish_to_ws(session_id, {"type": "status", "stage": stage, "label": label})
 
     if should_stream_text:
         _publish_to_ws(session_id, {"type": "text_stream_start"})
 
     def _on_chunk(text: str) -> None:
         _publish_to_ws(session_id, {"type": "text_chunk", "chunk": text})
+
+    def _on_sources(sources: list) -> None:
+        # Sent as soon as retrieval settles, ahead of the first token, so the
+        # client can show what the answer is being drawn from while it writes.
+        _publish_to_ws(session_id, {"type": "sources", "sources": sources})
 
     ai_start = time.monotonic()
     try:
@@ -166,6 +234,15 @@ async def _do_rag_turn(
             course_domain_topics=course.get("domain_topics"),
             memory=memory,
             on_chunk=_on_chunk if should_stream_text else None,
+            on_progress=_on_progress,
+            on_sources=_on_sources,
+            # Video answers are spoken by a 90s-capped avatar → keep them short.
+            concise=(response_format == "video"),
+            # Learn-mode text answers are presented on the lesson board: slides
+            # with typeset maths and plots, narrated in the client. The fences
+            # ride the normal text stream, so the board builds as it arrives.
+            board=(response_format != "video" and mode == "learn" and _board_enabled()),
+            images=images,
         )
     except Exception as e:
         error_result = {"error": str(e), "status": "failed"}
@@ -177,6 +254,11 @@ async def _do_rag_turn(
 
     video_ms: int | None = None
     video_start = time.monotonic()
+    if response_format == "video":
+        _publish_to_ws(
+            session_id,
+            {"type": "status", "stage": "rendering_video", "label": "Creating your video"},
+        )
     try:
         delivery = await maybe_generate_video(
             text=tutor_text,
@@ -202,6 +284,8 @@ async def _do_rag_turn(
         response_format=delivery.get("response_format", "text"),
         video_url=delivery.get("video_url"),
         audio_url=delivery.get("audio_url"),
+        sources=result.get("sources"),
+        attachments=await _retain_attachments(user_id, session_id, images),
     )
 
     analytics.log_request_metric(
@@ -215,7 +299,15 @@ async def _do_rag_turn(
         video_generation_ms=video_ms,
     )
 
-    final_result = {"type": "response_complete", "mode": mode, "response": tutor_text, **delivery}
+    final_result = {
+        "type": "response_complete",
+        "mode": mode,
+        "response": tutor_text,
+        # Repeated on the terminal push so a client that reconnected mid-turn,
+        # or missed the earlier `sources` event, can still render citations.
+        "sources": result.get("sources", []),
+        **delivery,
+    }
     _publish_to_ws(session_id, final_result)
     return final_result
 
@@ -227,10 +319,13 @@ def process_rag_turn_task(
     message: str,
     mode: str = "learn",
     prefers_video: bool | None = None,  # M-17
+    images: list | None = None,
 ):
     reset_async_supabase()
     try:
-        result = asyncio.run(_do_rag_turn(session_id, user_id, message, mode, prefers_video))
+        result = asyncio.run(
+            _do_rag_turn(session_id, user_id, message, mode, prefers_video, images)
+        )
     except Exception as e:
         logger.exception("process_rag_turn_task failed  session=%s: %s", session_id, e)
         result = {"status": "failed", "error": "Processing failed. Please try again."}
@@ -268,6 +363,7 @@ async def _do_mode_session_start(
     ai_start = time.monotonic()
 
     if mode == "review":
+        _publish_status(session_id, "preparing", "Preparing your first question")
         item, contexts = await generate_review_item(
             session_type=session_type,
             difficulty=difficulty,
@@ -331,6 +427,7 @@ async def _do_mode_session_start(
         }
 
     # APPLICATION
+    _publish_status(session_id, "preparing", "Building your practice scenario")
     scenario, contexts = await generate_application_scenario(
         session_type=session_type,
         difficulty=difficulty,
@@ -459,6 +556,11 @@ def process_ingestion_task(
     return {"document_id": document_id, "status": "complete"}
 
 
+# Render tasks deliberately live in app/media/render/tasks.py, not here — see
+# the CELERY_INCLUDE note in app/core/celery_app.py. The API dispatches them by
+# name so it never imports manim.
+
+
 # ---------------------------------------------------------------------------
 # Mode session TURN Celery task
 # ---------------------------------------------------------------------------
@@ -504,6 +606,7 @@ async def _do_mode_session_turn(
     # APPLICATION                                                          #
     # ------------------------------------------------------------------ #
     if mode == "application":
+        _publish_status(session_id, "evaluating", "Evaluating your answer")
         eval_out = await evaluate_application_answer(
             scenario=pending_payload,
             step=step,
@@ -638,6 +741,7 @@ async def _do_mode_session_turn(
     # ------------------------------------------------------------------ #
     # REVIEW                                                               #
     # ------------------------------------------------------------------ #
+    _publish_status(session_id, "evaluating", "Evaluating your answer")
     eval_out = await evaluate_review_answer(
         item=pending_payload,
         student_answer=student_answer,
@@ -708,6 +812,7 @@ async def _do_mode_session_turn(
             "video_url": None,
         }
 
+    _publish_status(session_id, "preparing", "Preparing the next question")
     item2, ctx2 = await generate_review_item(
         session_type=session_type,
         difficulty=next_difficulty,

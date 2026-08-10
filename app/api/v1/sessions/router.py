@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import auth_guard
+from app.core.enrolment import (
+    PARTICIPATING_STATUSES,
+    list_enrolled_course_ids,
+    require_enrolment,
+    require_mode_enabled,
+)
 from app.db.supabase import get_user_client
+from app.media.storage_service import STUDENT_UPLOADS_BUCKET, signed_url
 from app.models.models import VideoToggle, SessionModeUpdate, SessionCreateRequest, SessionTitleUpdate
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
@@ -13,6 +20,27 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sign_attachments(attachments) -> list | None:
+    """Swap stored storage paths for short-lived signed URLs.
+
+    Only the path is persisted on the conversation row — student-uploads is a
+    private bucket, so a raw path is useless to the browser and a permanent URL
+    would expose one student's work to anyone who ever saw the link.
+    """
+    if not attachments:
+        return None
+
+    signed = []
+    for item in attachments:
+        path = item.get("path")
+        if not path:
+            continue
+        url = signed_url(item.get("bucket", STUDENT_UPLOADS_BUCKET), path)
+        if url:
+            signed.append({"url": url, "media_type": item.get("media_type")})
+    return signed or None
 
 
 def _validate_uuid(value: str) -> str:
@@ -77,7 +105,27 @@ def list_sessions(
 
 @router.get("/courses")
 def list_courses(user=Depends(auth_guard)):
-    res = get_user_client(user["token"]).table("courses").select("id, name, description").execute()
+    """Courses this student may open.
+
+    Previously returned the whole catalogue, which let any student see every
+    course on the platform and hand the id straight to POST /sessions/. The
+    enrolment check now rejects that, but the list should not advertise it
+    either.
+
+    TRANSITIONAL: a caller with no enrolments at all still sees everything.
+    Right now nobody has an enrolment row, so filtering strictly would cut off
+    every existing account the moment this deploys. Remove this fallback (and
+    return an empty list, prompting the user for an invite code) once the
+    pilot cohort has been enrolled — see task #16.
+    """
+    supabase = get_user_client(user["token"])
+    query = supabase.table("courses").select("id, name, description")
+
+    course_ids = list_enrolled_course_ids(user["id"])
+    if course_ids:
+        query = query.in_("id", course_ids)
+
+    res = query.execute()
     return {"courses": res.data or []}
 
 
@@ -92,6 +140,11 @@ def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
     mode = (payload.mode or "learn").lower().strip()
     if mode not in ("learn", "application", "review"):
         raise HTTPException(status_code=400, detail="mode must be learn|application|review")
+
+    # Permission stack steps 3 and 4 — Student Permission Checks §3.1.
+    # Starting a session is new work, so a completed enrolment is not enough.
+    require_enrolment(user, payload.course_id, PARTICIPATING_STATUSES)
+    require_mode_enabled(payload.course_id, mode)
 
     ins = supabase.table("sessions").insert({
         "user_id": user["id"],
@@ -144,9 +197,16 @@ def set_session_mode(session_id: str, payload: SessionModeUpdate, user=Depends(a
         raise HTTPException(status_code=400, detail="current_mode must be learn|application|review")
 
     supabase = get_user_client(user["token"])
-    res = supabase.table("sessions").select("prefers_video").eq("id", sid).execute()
+    res = supabase.table("sessions").select("prefers_video, course_id").eq("id", sid).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Switching an existing session into Application mode is the same privilege
+    # as starting one there — otherwise the check at creation is trivially
+    # sidestepped by opening a Learn session and flipping the mode.
+    course_id = res.data[0].get("course_id")
+    if course_id:
+        require_mode_enabled(course_id, mode)
 
     update_payload = {"current_mode": mode}
     if mode == "review":
@@ -194,17 +254,38 @@ def get_conversations(
     if not supabase.table("sessions").select("id").eq("id", sid).execute().data:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    convos = (
-        supabase.table("conversations")
-        .select("id,mode,user_input,tutor_response,response_format,video_url,audio_url,created_at")
-        .eq("session_id", sid)
-        .order("created_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
+    columns = (
+        "id,mode,user_input,tutor_response,response_format,"
+        "video_url,audio_url,created_at,sources,attachments"
     )
+    try:
+        convos = (
+            supabase.table("conversations")
+            .select(columns)
+            .eq("session_id", sid)
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+    except Exception:
+        # Columns absent until add_conversation_sources_and_file_retention.sql
+        # is applied. A transcript without citations beats a 500.
+        convos = (
+            supabase.table("conversations")
+            .select(columns.replace(",sources,attachments", ""))
+            .eq("session_id", sid)
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+
+    rows = list(reversed(convos.data or []))
+    for row in rows:
+        row["attachments"] = _sign_attachments(row.get("attachments"))
+
     return {
         "session_id": sid,
-        "conversations": list(reversed(convos.data or [])),
+        "conversations": rows,
         "limit": limit,
         "offset": offset,
     }

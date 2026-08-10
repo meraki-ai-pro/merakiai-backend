@@ -5,6 +5,7 @@
 
 # Runtime LLM config overrides (admin-managed, not source)
 llm_config.json
+media_config.json
 
 # Python
 __pycache__/

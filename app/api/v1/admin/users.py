@@ -6,7 +6,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.core.auth import admin_guard
+from app.core.auth import admin_guard, require_mfa_if_enrolled
 from app.db.supabase import get_supabase
 
 # Characters that have special meaning in PostgREST filter strings.
@@ -15,7 +15,21 @@ _POSTGREST_METACHAR_RE = re.compile(r"[,.()\[\]{}]")
 
 router = APIRouter(prefix="/users", tags=["Admin – Users"])
 
-_ROLE_HIERARCHY = {"user": 0, "admin": 1, "super_admin": 2}
+# Ordering is for display and coarse comparison only. 'lecturer' is not
+# "more than a student" in an authority sense — it is a different capability
+# set, scoped to owned courses — so assignment rules live in _ASSIGNABLE_BY
+# rather than being derived from these numbers.
+_ROLE_HIERARCHY = {"user": 0, "lecturer": 1, "admin": 2, "super_admin": 3}
+
+# Roles that confer platform-wide authority.
+_PRIVILEGED_ROLES = frozenset({"admin", "super_admin"})
+
+# Who may hand out which role (Roadmap §B.1: only super_admin promotes to
+# admin/super_admin — previously an admin could mint another admin).
+_ASSIGNABLE_BY = {
+    "admin": frozenset({"user", "lecturer"}),
+    "super_admin": frozenset({"user", "lecturer", "admin", "super_admin"}),
+}
 
 
 class RoleUpdatePayload(BaseModel):
@@ -93,20 +107,40 @@ async def get_user_detail(user_id: str, _user=Depends(admin_guard)):
 
 
 @router.patch("/{user_id}/role")
-def update_user_role(user_id: str, payload: RoleUpdatePayload, user=Depends(admin_guard)):
+def update_user_role(
+    user_id: str,
+    payload: RoleUpdatePayload,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
     new_role = payload.role
     if new_role not in _ROLE_HIERARCHY:
         raise HTTPException(status_code=400, detail=f"Invalid role: {new_role!r}")
-
-    # Admins can only assign up to 'admin'; super_admins can assign any role
-    if _ROLE_HIERARCHY.get(new_role, -1) > _ROLE_HIERARCHY.get(user["role"], -1):
-        raise HTTPException(status_code=403, detail="Cannot assign a role higher than your own")
 
     # Prevent self-demotion
     if user_id == user["id"]:
         raise HTTPException(status_code=400, detail="Cannot change your own role")
 
     sb = get_supabase()
+
+    current = sb.table("users").select("role").eq("id", user_id).execute().data
+    if not current:
+        raise HTTPException(status_code=404, detail="User not found")
+    current_role = current[0]["role"]
+
+    # Admin rights are super-admin territory in BOTH directions — granting them
+    # and taking them away. Checking only the target role would let an admin
+    # demote a super_admin, which is an escalation by removal.
+    touches_admin = _PRIVILEGED_ROLES & {new_role, current_role}
+    if touches_admin and user["role"] != "super_admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only a super admin may grant or revoke admin roles",
+        )
+
+    if new_role not in _ASSIGNABLE_BY.get(user["role"], frozenset()):
+        raise HTTPException(status_code=403, detail=f"You may not assign the role {new_role!r}")
+
     res = sb.table("users").update({"role": new_role}).eq("id", user_id).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="User not found")
@@ -114,7 +148,11 @@ def update_user_role(user_id: str, payload: RoleUpdatePayload, user=Depends(admi
 
 
 @router.delete("/{user_id}")
-def delete_user(user_id: str, user=Depends(admin_guard)):
+def delete_user(
+    user_id: str,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
     if user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Only super admins can delete users")
     if user_id == user["id"]:

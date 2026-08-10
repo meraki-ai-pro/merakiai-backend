@@ -1,7 +1,21 @@
 from docx import Document
-from unstructured.partition.auto import partition
 import tempfile
 import os
+
+
+def _load_partition():
+    """Import unstructured's auto-partitioner lazily.
+
+    ``unstructured.file_utils.filetype`` does ``importlib.import_module("magic")``
+    at module scope. On Windows, python-magic hunts for libmagic DLLs and can
+    spin at 100% CPU indefinitely when it cannot find them — which blocked
+    ``app.main`` from ever finishing its import, so the API never bound a port.
+    Deferring the import to the one function that needs it keeps startup at
+    ~11s and confines any such hang to PDF parsing inside the ingestion worker.
+    """
+    from unstructured.partition.auto import partition
+
+    return partition
 
 
 def parse_document(upload_file):
@@ -35,7 +49,7 @@ def parse_pdf(path):
     Uses unstructured for layout-aware parsing.
     Falls back to PyPDF if needed.
     """
-    elements = partition(filename=path)
+    elements = _load_partition()(filename=path)
 
     sections = []
     current_section = {"title": None, "content": ""}

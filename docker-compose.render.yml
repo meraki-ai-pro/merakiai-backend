@@ -1,0 +1,70 @@
+# Render worker service.
+#
+# Overlay on your existing compose file:
+#   docker compose -f "D:/compose files/docker-compose.yml" -f docker-compose.render.yml up -d
+#
+# The security options below are the second and stronger half of the sandbox.
+# The AST allowlist in app/media/render/sandbox.py rejects what it recognises;
+# these flags contain what it does not. Do not drop them to "get a render
+# working" — a render that needs the network or a writable root is a render
+# doing something a diagram does not need to do.
+
+services:
+  render-worker:
+    build:
+      context: .
+      dockerfile: render.Dockerfile
+    restart: unless-stopped
+
+    # No network namespace at all. Generated code cannot exfiltrate anything,
+    # call an external API, or reach your Supabase project even with valid
+    # credentials in hand.
+    #
+    # NOTE: this also blocks the worker's own broker connection, so the worker
+    # itself needs the broker reachable. Two supported shapes:
+    #   (a) leave network_mode commented out and rely on the other flags, or
+    #   (b) run rendering as a short-lived --network none child container.
+    # (a) is the pragmatic default; (b) is stricter and is the right answer if
+    # this is ever exposed to untrusted lecturers.
+    # network_mode: none
+
+    read_only: true
+    tmpfs:
+      # The only writable path. noexec matters: it stops a payload writing a
+      # binary and running it.
+      #
+      # mode=1777 is NOT optional. A tmpfs mounts root-owned and mode 755 by
+      # default, and this container runs as non-root `renderer` — without it
+      # Python cannot create a temp directory at all and every render dies with
+      # "No usable temporary directory found" before manim is even invoked.
+      - /tmp/renders:rw,noexec,nosuid,size=2g,mode=1777
+
+    security_opt:
+      # Blocks a process gaining privileges via setuid binaries.
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    # A runaway render must not take the host with it. Manim on a complex
+    # scene sits around 1GB; 2GB leaves headroom without being generous.
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 256
+
+    environment:
+      # Only what a render genuinely needs. Deliberately ABSENT:
+      # PINECONE_API_KEY, OPENAI_API_KEY, SUPABASE_JWT_SECRET — a render has no
+      # business touching retrieval, embeddings or auth, and a key that is not
+      # in the environment cannot be read out of it.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://admin:root1234@rabbitmq:5672//}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MANIM_QUALITY: ${MANIM_QUALITY:--qm}
+      MANIM_RENDER_TIMEOUT: ${MANIM_RENDER_TIMEOUT:-600}
+
+    depends_on:
+      - redis-merakiai
+      - rabbitmq-merakiai

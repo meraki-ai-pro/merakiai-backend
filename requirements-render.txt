@@ -1,0 +1,23 @@
+# Render worker dependencies only.
+#
+# Deliberately NOT requirements.txt. This container executes LLM-generated
+# Python, so every library present is a library that code can reach. Absent
+# here on purpose: pinecone, openai, elevenlabs, boto3, unstructured, pandas,
+# fastapi. A render needs none of them, and their credentials are not in this
+# container's environment either.
+
+# ── Task queue ────────────────────────────────────────────────────────────────
+celery==5.6.3
+kombu==5.6.2
+redis==7.4.0
+
+# ── Supabase (media_assets rows + rendered-media storage) ────────────────────
+supabase==2.28.3
+postgrest==2.28.3
+python-dotenv==1.2.2
+
+# ── Scene generation ──────────────────────────────────────────────────────────
+anthropic==0.95.0
+
+# ── Animation ─────────────────────────────────────────────────────────────────
+manim==0.18.1

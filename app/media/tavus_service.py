@@ -3,7 +3,8 @@ import time
 import requests
 from typing import Any, Dict, Optional
 
-TAVUS_API_KEY = os.getenv("TAVUS_API_KEY")
+from app.core.media_config import get_key
+
 TAVUS_DEFAULT_REPLICA_ID = os.getenv("TAVUS_DEFAULT_REPLICA_ID")
 
 TAVUS_BASE_URL = "https://tavusapi.com/v2"
@@ -14,10 +15,12 @@ class TavusError(RuntimeError):
 
 
 def get_tavus_headers() -> dict:
-    if not TAVUS_API_KEY:
+    # Read at call time so an admin-rotated key takes effect without a restart.
+    api_key = get_key("TAVUS_API_KEY")
+    if not api_key:
         raise TavusError("Missing TAVUS_API_KEY in environment variables.")
     return {
-        "x-api-key": TAVUS_API_KEY,
+        "x-api-key": api_key,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
