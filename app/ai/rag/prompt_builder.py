@@ -15,10 +15,97 @@ You are a teacher.
 _DEFAULT_DOMAIN_TOPICS = ["the course subject matter"]
 
 
+# Progressive scaffolding (Proposal §2.2). The same engine teaches Level 100
+# calculus and doctoral research design; what changes is how much of the
+# reasoning is done *for* the student.
+#
+# Keyed by TIER, not by level: Level 100 and Level 200 are taught identically,
+# and duplicating the instruction per level would let them drift apart. The
+# level -> tier mapping lives in app/core/academic_levels.py.
+#
+# These belong in the SYSTEM text, not the user text: a course's level does not
+# change between turns, so keeping it here preserves the prompt cache.
+_SCAFFOLDING = {
+    "foundation": """
+LEVEL: FOUNDATION (Access, Level 100-200, HND)
+
+- Assume no prior exposure to this topic. Define terms the first time.
+- Show every step of a worked example, including the algebra a textbook
+  would skip. The step a student loses is almost always the omitted one.
+- After a worked example, state the general rule it demonstrates.
+- Prefer one concrete example over a general statement.
+""",
+    "intermediate": """
+LEVEL: INTERMEDIATE (Level 300)
+
+- Assume the foundational vocabulary of the subject is known.
+- Show the key steps of a derivation, not every line of algebra.
+- Connect the concept to its applications in the discipline.
+- Ask the student to attempt the next step before giving it.
+""",
+    "advanced": """
+LEVEL: ADVANCED (Level 400-600, final and professional years)
+
+- Assume fluency with the standard results and notation.
+- Emphasise synthesis: how this connects to what they already know, where it
+  breaks down, and what the edge cases are.
+- Give the outline of an argument and let the student fill it in.
+- Reference the primary literature or professional standards where relevant.
+""",
+    "masters": """
+LEVEL: MASTERS (MPhil / MSc / MA / MBA)
+
+- Engage critically rather than didactically. Evaluate competing approaches.
+- Discuss methodological choices and their trade-offs.
+- Point to the literature and to where the evidence is contested.
+- Treat the student as a junior colleague working through a problem.
+""",
+    "doctoral": """
+LEVEL: DOCTORAL (PhD)
+
+- Assume expertise. Do not explain standard results.
+- Focus on argument construction, methodological rigour and the boundaries of
+  current knowledge.
+- Offer peer-review style critique: what a reviewer would challenge and why.
+- Where the question has no settled answer, say so and map the positions.
+""",
+}
+
+# HND is a foundation-tier level with a different emphasis: technical
+# universities teach applied practice, so a derivation matters less than a
+# worked example a student can reproduce on the job.
+_HND_EMPHASIS = """
+- This is an HND / Diploma cohort. Favour applied, practical worked examples
+  over theoretical derivation. Show how the result is used before showing
+  where it comes from.
+"""
+
+
+def scaffolding_for(academic_level: str | None) -> str:
+    """Level-appropriate teaching instruction. Empty when unknown.
+
+    Unknown levels fall back to no instruction rather than to the lowest tier.
+    Guessing wrong in the explaining-too-much direction is patronising to a
+    Masters student; guessing wrong the other way leaves a Level 100 student
+    stuck. Saying nothing keeps the behaviour the pilot is tuned for.
+    """
+    from app.core.academic_levels import normalise, tier_for
+
+    tier = tier_for(academic_level)
+    if not tier:
+        return ""
+
+    block = _SCAFFOLDING.get(tier, "")
+    if normalise(academic_level) == "hnd":
+        block = f"{block.rstrip()}{_HND_EMPHASIS}"
+    return block
+
+
 def _build_system_text(
     mode: str,
     course_persona: str = None,
     course_domain_topics: list = None,
+    academic_level: str | None = None,
 ) -> str:
     """Return the stable system-prompt text (persona + domain + mode instruction).
 
@@ -110,7 +197,10 @@ Rules:
     else:
         raise ValueError(f"Invalid mode: {mode!r}")
 
-    return f"{system_persona}\n\n{domain_constraint}\n\n{mode_instruction}".strip()
+    scaffolding = scaffolding_for(academic_level)
+    return (
+        f"{system_persona}\n\n{domain_constraint}\n\n{mode_instruction}\n\n{scaffolding}"
+    ).strip()
 
 
 # Board directive. The client renders these fences as a slide deck with
@@ -157,6 +247,28 @@ plot to that slide immediately after its body, before the closing fence:
 - Only add a plot when it teaches something. Most slides do not need one.
 """
 
+# Appended to the board directive only when the course actually has approved
+# concept videos. The list is injected rather than left to the model's
+# judgement: a hallucinated concept key resolves to nothing and the student
+# sees a silent gap where a video was promised.
+_BOARD_VIDEO_DIRECTIVE = """
+A short animated video has been produced and approved by the lecturer for these
+concepts:
+
+{concept_list}
+
+If one of them is what this answer is explaining, put it on its own slide at
+the point where watching it would help, using exactly:
+
+::: video <concept-key>
+:::
+
+- Use ONLY a key from the list above, spelled exactly as written. There is no
+  video for anything else, and inventing a key shows the student nothing.
+- At most one video per answer, and only when it is genuinely the concept being
+  asked about. The slides already explain it; the video is reinforcement.
+"""
+
 # Spoken-answer directive for video responses. D-ID Agents streaming rejects
 # audio longer than 90 seconds, so a video answer must be short and
 # speech-friendly (no markdown/lists/symbols, which also sound wrong when
@@ -178,10 +290,12 @@ Each passage above is numbered. When a statement rests on one of them, put its
 number in square brackets at the end of the sentence, like this [2]. Cite the
 passage you actually used; if two support a sentence, give both [1][3].
 
-- Do not cite general mathematical knowledge you did not take from a passage.
+- THE ONLY VALID CITATION NUMBERS ARE [1] TO [{highest}]. There is no [{beyond}]
+  or higher. A number outside that range points at nothing and is shown to the
+  student as broken text.
+- Do not cite general knowledge you did not take from a passage.
 - If the passages do not cover what was asked, say so plainly rather than
   citing something that does not support the point.
-- Never invent a number that is not listed above.
 """
 
 
@@ -210,13 +324,19 @@ Do not quote verbatim unless necessary.
         label = source.get("location") or "course material"
         entries.append(f"[{index}] ({label})\n{text}")
 
+    # The range is stated concretely rather than as "not listed above". Live
+    # testing produced a [7] against six sources — the model will invent a
+    # plausible next number unless the ceiling is named.
+    highest = len(entries)
+    citation_rules = _CITATION_INSTRUCTION.format(highest=highest, beyond=highest + 1)
+
     return f"""
 REFERENCE MATERIAL:
 {(chr(10) + chr(10)).join(entries)}
 
 Use this material to ensure factual accuracy.
 Do not quote verbatim unless necessary.
-{_CITATION_INSTRUCTION}"""
+{citation_rules}"""
 
 
 def build_system_and_user(
@@ -229,6 +349,9 @@ def build_system_and_user(
     concise: bool = False,
     board: bool = False,
     sources: list | None = None,
+    video_concepts: list[str] | None = None,
+    academic_level: str | None = None,
+    insufficient_context: bool = False,
 ) -> tuple[str, str]:
     """Return ``(system_text, user_text)`` for a RAG turn.
 
@@ -248,7 +371,9 @@ def build_system_and_user(
     instructed to cite; when omitted the block is unnumbered and no citation is
     requested.
     """
-    system_text = _build_system_text(mode, course_persona, course_domain_topics)
+    system_text = _build_system_text(
+        mode, course_persona, course_domain_topics, academic_level
+    )
 
     memory_block = ""
     if memory:
@@ -261,8 +386,21 @@ def build_system_and_user(
         format_block = _VIDEO_BREVITY_DIRECTIVE
     elif board:
         format_block = _BOARD_DIRECTIVE
+        if video_concepts:
+            format_block += _BOARD_VIDEO_DIRECTIVE.format(
+                concept_list="\n".join(f"- {key}" for key in video_concepts)
+            )
     else:
         format_block = ""
+
+    # Weak retrieval: instruct honesty rather than letting the model assemble a
+    # confident answer out of loosely-related passages. A fluent wrong answer is
+    # the worst failure a teaching system has, because the student cannot tell.
+    # Rides the dynamic user text because it varies per turn.
+    if insufficient_context:
+        from app.ai.rag.crag import INSUFFICIENT_CONTEXT_DIRECTIVE
+
+        reference_block = f"{reference_block}\n{INSUFFICIENT_CONTEXT_DIRECTIVE}"
 
     user_text = (
         f"{memory_block}\n{reference_block}\n{format_block}\n"

@@ -21,7 +21,7 @@ from app.ai.rag.service import query_rag
 from app.media.video_service import maybe_generate_video
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET, upload_student_image
 from app.db.supabase import get_supabase, reset_async_supabase
-from app.core import analytics
+from app.core import analytics, events
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +243,9 @@ async def _do_rag_turn(
             # ride the normal text stream, so the board builds as it arrives.
             board=(response_format != "video" and mode == "learn" and _board_enabled()),
             images=images,
+            # Progressive scaffolding — a doctoral course should not be
+            # taught like a first-year one (Proposal §2.2).
+            academic_level=course.get("academic_level"),
         )
     except Exception as e:
         error_result = {"error": str(e), "status": "failed"}
@@ -297,6 +300,24 @@ async def _do_rag_turn(
         total_processing_ms=total_ms,
         ai_processing_ms=ai_ms,
         video_generation_ms=video_ms,
+    )
+
+    # Research telemetry. Deliberately after log_conversation: the transcript
+    # is the record that matters, the event is the measurement.
+    events.emit(
+        events.TURN_COMPLETED,
+        user_id=user_id,
+        course_id=course["id"],
+        session_id=session_id,
+        payload={
+            "mode": mode,
+            "response_format": delivery.get("response_format", "text"),
+            "total_ms": total_ms,
+            "ai_ms": ai_ms,
+            "video_ms": video_ms,
+            "sources": len(result.get("sources") or []),
+            "had_images": bool(images),
+        },
     )
 
     final_result = {

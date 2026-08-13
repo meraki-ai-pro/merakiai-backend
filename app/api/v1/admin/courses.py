@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.core.academic_levels import AcademicLevel
 from app.core.auth import LECTURER_ROLES, admin_guard
 from app.db.supabase import get_supabase
 
 router = APIRouter(prefix="/courses", tags=["Admin – Courses"])
 
 
-# Mirrors courses_academic_level_check in
-# sql/add_lecturer_role_and_course_ownership.sql — keep the two in step.
-AcademicLevel = Literal["foundation", "intermediate", "advanced", "masters", "doctoral"]
+# Single source of truth — see app/core/academic_levels.py
 
 
 class CourseCreatePayload(BaseModel):

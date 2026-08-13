@@ -268,7 +268,7 @@ def get_conversations(
             .execute()
         )
     except Exception:
-        # Columns absent until add_conversation_sources_and_file_retention.sql
+        # Columns absent until 007_add_conversation_sources_and_file_retention.sql
         # is applied. A transcript without citations beats a 500.
         convos = (
             supabase.table("conversations")

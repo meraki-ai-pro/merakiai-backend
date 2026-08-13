@@ -31,6 +31,7 @@ import logging
 import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -38,7 +39,9 @@ from openai import AsyncOpenAI
 from pinecone import Pinecone
 
 from app.ai.ingestion.namespaces import search_namespaces
+from app.ai.rag import embedding_cache
 from app.ai.rag.visibility import visible_document_ids
+from app.core.events import RETRIEVAL_EMPTY, emit
 from app.db.supabase import get_async_supabase
 
 logger = logging.getLogger(__name__)
@@ -201,15 +204,32 @@ async def _store_embedding(text: str, embedding):
 
 
 async def embed_query(query: str) -> List[float]:
-    embedding = await _get_cached_embedding(query)
-    if embedding is None:
-        client = _get_openai()
-        response = await client.embeddings.create(
-            model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
-            input=query,
-        )
-        embedding = response.data[0].embedding
-        await _store_embedding(query, embedding)
+    """Embed a student's question, cached in memory then Redis.
+
+    The Supabase-backed cache this replaced was measured at 687ms to read and
+    891ms to write, against a ~500ms OpenAI call — it cost more than the work
+    it avoided, and the write blocked the turn after the embedding was already
+    in hand. See app/ai/rag/embedding_cache.py for the numbers.
+
+    Set EMBED_CACHE_SUPABASE=1 to additionally write through to the old
+    embedding_cache table. It is never read on this path.
+    """
+    cached = await embedding_cache.get(query)
+    if cached is not None:
+        return _normalize_embedding(cached)
+
+    client = _get_openai()
+    response = await client.embeddings.create(
+        model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
+        input=query,
+    )
+    embedding = response.data[0].embedding
+
+    # Not awaited: the answer does not depend on the cache write landing.
+    embedding_cache.put_background(query, embedding)
+    if os.getenv("EMBED_CACHE_SUPABASE", "0").strip().lower() in ("1", "true", "yes"):
+        asyncio.create_task(_store_embedding(query, embedding))
+
     return _normalize_embedding(embedding)
 
 
@@ -389,23 +409,56 @@ def _rerank_provider() -> str:
     return "off"
 
 
-async def _rerank_cohere(query: str, chunks: List[RetrievedChunk], top_k: int) -> List[RetrievedChunk]:
-    import httpx
+# Persistent HTTP client for Cohere.
+#
+# This used to be `async with httpx.AsyncClient(...)` inside the function, which
+# meant a fresh TLS handshake to api.cohere.com on EVERY turn — measured at
+# roughly a second, against ~200ms of actual reranking.
+#
+# It is deliberately the SYNC client, called through a thread. Celery runs
+# asyncio.run() per task, so every turn gets a brand new event loop; an
+# AsyncClient binds its connection pool to the loop that created it and would
+# be unusable (or silently re-handshake) on the next turn. A sync client is not
+# loop-bound, so the connection genuinely survives.
+_cohere_http = None
 
-    model = os.getenv("RAG_RERANK_MODEL_COHERE", "rerank-v3.5")
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.post(
-            "https://api.cohere.com/v2/rerank",
+
+def _get_cohere_client():
+    global _cohere_http
+    if _cohere_http is None:
+        import httpx
+
+        _cohere_http = httpx.Client(
+            # Below the rerank budget, so httpx gives up first and we get a
+            # clean error rather than a cancelled task mid-flight.
+            timeout=float(os.getenv("RAG_RERANK_BUDGET_MS", "2500")) / 1000,
+            # Keep the connection alive well past the gap between turns.
+            limits=httpx.Limits(max_keepalive_connections=4, keepalive_expiry=300),
             headers={"Authorization": f"Bearer {os.getenv('COHERE_API_KEY')}"},
+        )
+    return _cohere_http
+
+
+async def _rerank_cohere(query: str, chunks: List[RetrievedChunk], top_k: int) -> List[RetrievedChunk]:
+    model = os.getenv("RAG_RERANK_MODEL_COHERE", "rerank-v3.5")
+
+    def _post():
+        response = _get_cohere_client().post(
+            "https://api.cohere.com/v2/rerank",
             json={
                 "model": model,
+                # Truncated: the reranker judges relevance, and sending whole
+                # parent sections inflates the request without improving the
+                # ordering. 600 chars matches the LLM judge's window.
+                "documents": [c.text[:600] for c in chunks],
                 "query": query,
-                "documents": [c.text for c in chunks],
                 "top_n": min(top_k, len(chunks)),
             },
         )
         response.raise_for_status()
-        payload = response.json()
+        return response.json()
+
+    payload = await asyncio.to_thread(_post)
 
     ordered: List[RetrievedChunk] = []
     for result in payload.get("results", []):
@@ -431,9 +484,11 @@ _RERANK_SCHEMA = {
 
 async def _rerank_llm(query: str, chunks: List[RetrievedChunk], top_k: int) -> List[RetrievedChunk]:
     """Order passages with a small, fast model acting as a relevance judge."""
-    from anthropic import AsyncAnthropic
+    # Reuses the shared client rather than constructing an AsyncAnthropic per
+    # call — same TLS-handshake-per-turn problem as the Cohere path had.
+    from app.ai.rag.claude import get_client
 
-    client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    client = get_client()
     # A reranker runs inside the latency budget of every turn and does no
     # generation, so it is deliberately a small model. Override if needed.
     model = os.getenv("RAG_RERANK_MODEL", "claude-haiku-4-5")
@@ -448,11 +503,14 @@ async def _rerank_llm(query: str, chunks: List[RetrievedChunk], top_k: int) -> L
         f"STUDENT QUESTION:\n{query}\n\nPASSAGES:\n{listing}"
     )
 
-    response = await client.messages.create(
-        model=model,
-        max_tokens=500,
-        output_config={"format": {"type": "json_schema", "schema": _RERANK_SCHEMA}},
-        messages=[{"role": "user", "content": prompt}],
+    # Sync client on a thread, for the same loop-binding reason as Cohere.
+    response = await asyncio.to_thread(
+        lambda: client.messages.create(
+            model=model,
+            max_tokens=500,
+            output_config={"format": {"type": "json_schema", "schema": _RERANK_SCHEMA}},
+            messages=[{"role": "user", "content": prompt}],
+        )
     )
 
     text = "".join(b.text for b in response.content if b.type == "text")
@@ -474,25 +532,77 @@ async def _rerank_llm(query: str, chunks: List[RetrievedChunk], top_k: int) -> L
     return ordered
 
 
+# Hard ceiling on reranking, measured against what it buys.
+#
+# Reranking improves precision by roughly a second's worth of work. It is never
+# worth twenty. The old code inherited a 20s HTTP timeout, so a throttled or
+# stalled reranker turned a 4s turn into a 24s one before falling back — and it
+# DID fall back, so the student waited twenty seconds for nothing.
+_RERANK_BUDGET = float(os.getenv("RAG_RERANK_BUDGET_MS", "2500")) / 1000
+
+# Circuit breaker. Once a provider is failing — a rate-limited free-tier key,
+# an outage — paying the budget on every single turn is pure loss, because the
+# fallback is already known to be acceptable. Trip open, retry occasionally.
+_RERANK_FAILS = 0
+_RERANK_OPEN_UNTIL = 0.0
+_RERANK_TRIP_AFTER = int(os.getenv("RAG_RERANK_TRIP_AFTER", "3"))
+_RERANK_COOLDOWN = float(os.getenv("RAG_RERANK_COOLDOWN_S", "60"))
+
+
+def _rerank_circuit_open() -> bool:
+    return time.monotonic() < _RERANK_OPEN_UNTIL
+
+
+def _note_rerank_failure() -> None:
+    global _RERANK_FAILS, _RERANK_OPEN_UNTIL
+    _RERANK_FAILS += 1
+    if _RERANK_FAILS >= _RERANK_TRIP_AFTER:
+        _RERANK_OPEN_UNTIL = time.monotonic() + _RERANK_COOLDOWN
+        _RERANK_FAILS = 0
+        logger.warning(
+            "Re-ranking disabled for %.0fs after %d consecutive failures; "
+            "answers continue on the fused order",
+            _RERANK_COOLDOWN, _RERANK_TRIP_AFTER,
+        )
+
+
+def _note_rerank_success() -> None:
+    global _RERANK_FAILS
+    _RERANK_FAILS = 0
+
+
 async def _maybe_rerank(query: str, chunks: List[RetrievedChunk], top_k: int) -> List[RetrievedChunk]:
     provider = _rerank_provider()
     if provider == "off" or len(chunks) <= 1:
         return chunks[:top_k]
 
+    if _rerank_circuit_open():
+        return chunks[:top_k]
+
     try:
         if provider == "cohere":
-            ordered = await _rerank_cohere(query, chunks, top_k)
+            coro = _rerank_cohere(query, chunks, top_k)
         elif provider == "llm":
-            ordered = await _rerank_llm(query, chunks, top_k)
+            coro = _rerank_llm(query, chunks, top_k)
         else:
             logger.warning("Unknown RAG_RERANK provider %r — skipping", provider)
             return chunks[:top_k]
+
+        ordered = await asyncio.wait_for(coro, timeout=_RERANK_BUDGET)
+    except asyncio.TimeoutError:
+        _note_rerank_failure()
+        logger.warning(
+            "Re-ranking exceeded its %.1fs budget; using the fused order", _RERANK_BUDGET
+        )
+        return chunks[:top_k]
     except Exception:
         # Re-ranking is a precision improvement, never a dependency. Fused
         # order is already a good answer.
+        _note_rerank_failure()
         logger.warning("Re-ranking failed; falling back to fused order", exc_info=True)
         return chunks[:top_k]
 
+    _note_rerank_success()
     return ordered[:top_k] if ordered else chunks[:top_k]
 
 
@@ -576,6 +686,9 @@ async def retrieve(
 
     if not pool:
         logger.info("No chunks retrieved for course=%s mode=%s", course_id, mode)
+        # A research metric in its own right: how often the knowledge base
+        # fails to answer, which is what CRAG (#24) would act on.
+        emit(RETRIEVAL_EMPTY, course_id=course_id, payload={"mode": mode})
         return []
 
     # Dense ranking (already sorted per namespace; re-sort across the merged pool).

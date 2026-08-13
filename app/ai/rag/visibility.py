@@ -22,10 +22,17 @@ from app.db.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
 
-# Short TTL, not correctness-critical: the worst case is a newly unpublished
-# document remaining answerable for a few seconds. Set RAG_VISIBILITY_TTL=0 to
-# disable caching entirely.
-_TTL_SECONDS = float(os.getenv("RAG_VISIBILITY_TTL", "15"))
+# Ten minutes, not fifteen seconds.
+#
+# The TTL is a backstop, not the correctness mechanism: every route that
+# changes visibility (publish, unpublish, delete) calls invalidate() directly,
+# so a lecturer's change still takes effect on the very next answer. The only
+# thing the TTL covers is a change made outside the API — a direct SQL edit —
+# and that does not warrant a 578ms Supabase round trip inside the latency
+# budget of every fourth turn.
+#
+# Set RAG_VISIBILITY_TTL=0 to disable caching entirely.
+_TTL_SECONDS = float(os.getenv("RAG_VISIBILITY_TTL", "600"))
 
 _cache: dict[tuple[str, str], tuple[float, list[str] | None]] = {}
 
@@ -52,7 +59,7 @@ def _fetch(course_id: str, mode: str) -> list[str] | None:
     except Exception as exc:  # noqa: BLE001 — columns may not exist yet
         logger.warning(
             "Visibility lookup failed for course=%s; retrieving unfiltered. "
-            "Apply add_mode_aware_publishable_documents.sql: %s",
+            "Apply 006_add_mode_aware_publishable_documents.sql: %s",
             course_id, exc,
         )
         return None

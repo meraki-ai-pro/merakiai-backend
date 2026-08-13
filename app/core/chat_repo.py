@@ -164,7 +164,7 @@ async def log_conversation(
 
     # Written on a retry rather than in the first insert so the turn is still
     # recorded on a database that predates
-    # add_conversation_sources_and_file_retention.sql. Losing the transcript
+    # 007_add_conversation_sources_and_file_retention.sql. Losing the transcript
     # would be far worse than losing its citations.
     optional = {}
     if sources:
@@ -181,7 +181,7 @@ async def log_conversation(
     except Exception as exc:  # noqa: BLE001 — columns may not exist yet
         logger.warning(
             "Conversation insert rejected sources/attachments; storing the turn "
-            "without them. Apply add_conversation_sources_and_file_retention.sql: %s",
+            "without them. Apply 007_add_conversation_sources_and_file_retention.sql: %s",
             exc,
         )
         await supabase.table("conversations").insert(payload).execute()

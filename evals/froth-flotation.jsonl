@@ -1,0 +1,15 @@
+// Golden set for the froth-flotation course — the one course with ingested
+// material, so this doubles as the worked example of the format.
+// Expectations are deliberately loose substrings; tighten them once a lecturer
+// has confirmed which sections should answer each question.
+{"question": "what is froth flotation?", "course_id": "froth-flotation", "mode": "learn", "topic": "introduction", "note": "baseline: the most basic question the course must answer"}
+{"question": "how do collectors work?", "course_id": "froth-flotation", "mode": "learn", "expect_text": ["collector"], "topic": "reagents"}
+{"question": "what are frothers used for?", "course_id": "froth-flotation", "mode": "learn", "expect_text": ["froth"], "topic": "reagents"}
+{"question": "explain hydrophobicity", "course_id": "froth-flotation", "mode": "learn", "topic": "surface chemistry"}
+{"question": "what is the role of pH in flotation?", "course_id": "froth-flotation", "mode": "learn", "topic": "process control"}
+{"question": "wait so why does the bubble stick to the particle", "course_id": "froth-flotation", "mode": "learn", "topic": "surface chemistry", "note": "conversational phrasing — exercises the query rewriter"}
+{"question": "what are depressants", "course_id": "froth-flotation", "mode": "learn", "topic": "reagents"}
+{"question": "describe the flotation cell", "course_id": "froth-flotation", "mode": "learn", "topic": "equipment"}
+{"question": "past exam questions on reagents", "course_id": "froth-flotation", "mode": "review", "topic": "revision", "note": "must retrieve review-tagged material, not lecture notes"}
+{"question": "what is the capital of France?", "course_id": "froth-flotation", "mode": "learn", "expect_no_answer": true, "note": "off-topic — correct behaviour is to admit the notes do not cover it"}
+{"question": "how do I calculate a Fourier transform?", "course_id": "froth-flotation", "mode": "learn", "expect_no_answer": true, "note": "plausible-sounding but out of scope; the trap a confident system falls into"}

@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from app.core import events
 from app.core.auth import auth_guard
 from app.core.enrolment import redeem_code
 from app.db.supabase import get_user_client
@@ -29,6 +30,12 @@ def join_course(payload: JoinPayload, user=Depends(auth_guard)):
     the last seat cannot both win.
     """
     enrolment = redeem_code(payload.code, user["token"])
+    events.emit(
+        events.ENROLMENT_CREATED,
+        user_id=user["id"],
+        course_id=enrolment.get("course_id"),
+        payload={"via": "invite_code"},
+    )
     return {"status": "ok", "enrolment": enrolment}
 
 

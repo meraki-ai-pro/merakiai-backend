@@ -24,7 +24,12 @@ from app.api.v1.sessions.router import router as sessions_router
 from app.api.v1.users.router import router as users_router
 from app.api.v1.feedback import router as feedback_router
 from app.api.v1.enrolments import router as enrolments_router
+from app.api.v1.events import router as events_router
+from app.api.v1.assessments import router as assessments_router
+from app.api.v1.feedback_suite import router as feedback_suite_router
+from app.api.v1.lifecycle import router as lifecycle_router
 from app.api.v1.render import router as render_router
+from app.api.v1.lecturer.router import router as lecturer_router
 from app.ai.rag.modes_sessions.router import router as mode_sessions_router
 from app.api.v1.ws.router import router as ws_router
 from app.api.v1.webhooks.did import router as did_webhook_router
@@ -110,7 +115,12 @@ app.include_router(sessions_router)
 app.include_router(users_router)
 app.include_router(feedback_router)
 app.include_router(enrolments_router)
+app.include_router(events_router)
+app.include_router(assessments_router)
+app.include_router(feedback_suite_router)
+app.include_router(lifecycle_router)
 app.include_router(render_router)
+app.include_router(lecturer_router)
 app.include_router(mode_sessions_router)
 app.include_router(ws_router)
 app.include_router(did_webhook_router)

@@ -15,7 +15,7 @@ from app.media.storage_service import upload_course_document
 logger = logging.getLogger(__name__)
 
 # The mode vocabulary the whole application uses. document_chunks.mode also
-# accepts the legacy 'practice' — see allow_application_mode_in_document_chunks.sql
+# accepts the legacy 'practice' — see 001_allow_application_mode_in_document_chunks.sql
 _VALID_MODES = ("learn", "review", "application")
 
 
@@ -125,7 +125,7 @@ async def ingest_document(
     }
 
     # Written separately so a database that predates
-    # add_mode_aware_publishable_documents.sql still accepts the insert — the
+    # 006_add_mode_aware_publishable_documents.sql still accepts the insert — the
     # retry below drops them rather than failing the upload.
     optional = {
         "target_modes": target_modes or [default_mode],
@@ -139,7 +139,7 @@ async def ingest_document(
     except Exception as exc:  # noqa: BLE001 — columns may not exist yet
         logger.warning(
             "Document insert rejected the mode/publish columns; falling back. "
-            "Apply add_mode_aware_publishable_documents.sql: %s",
+            "Apply 006_add_mode_aware_publishable_documents.sql: %s",
             exc,
         )
         doc_response = supabase.table("documents").insert(row).execute()
@@ -182,7 +182,7 @@ async def ingest_document(
 # `document_chunks.mode` carries a check constraint from an older vocabulary
 # that named the mode after the document type. It permits 'practice' but not
 # 'application', which every other table and the whole application use. Until
-# sql/allow_application_mode_in_document_chunks.sql is applied, writing the
+# sql/001_allow_application_mode_in_document_chunks.sql is applied, writing the
 # correct value fails; this maps to the value the constraint still accepts.
 # Once the migration lands the first insert succeeds and this is never reached,
 # so the shim retires itself.
@@ -222,7 +222,7 @@ def _store_chunk_rows(supabase, rows: list, mode: str, filename: str) -> None:
         logger.warning(
             "Stored chunk rows for %s with mode=%r instead of %r — the "
             "document_chunks check constraint predates the 'application' mode. "
-            "Apply sql/allow_application_mode_in_document_chunks.sql to fix.",
+            "Apply sql/001_allow_application_mode_in_document_chunks.sql to fix.",
             filename, legacy, mode,
         )
     except Exception as retry_error:
@@ -249,7 +249,7 @@ def _resolve_target_modes(supabase, document_id: str, default_mode: str) -> list
     """Modes this document should be indexed for.
 
     Falls back to ``[default_mode]`` whenever target_modes is absent, empty or
-    unreadable — including before add_mode_aware_publishable_documents.sql is
+    unreadable — including before 006_add_mode_aware_publishable_documents.sql is
     applied. Indexing into no namespace at all would ingest a document that can
     never be retrieved, which is worse than indexing into one.
     """

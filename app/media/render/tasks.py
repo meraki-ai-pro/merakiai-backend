@@ -12,15 +12,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from celery import shared_task
 
 logger = logging.getLogger(__name__)
 
-# Registers the renderer. Imported at module scope here (unlike everywhere
-# else) because this module is only ever loaded inside the render container,
-# which is the one place manim is installed.
-import app.media.render.manim_renderer  # noqa: E402,F401
+# Registers the renderer, at module scope because this module is only ever
+# loaded inside a render container.
+#
+# Only the renderer THIS image carries is imported: the Manim image has no
+# Node or Chromium and the Remotion image has no manim or LaTeX, so importing
+# both would break whichever container is running.
+_RENDERER = os.getenv("RENDERER", "manim").strip().lower()
+
+if _RENDERER == "remotion":
+    import app.media.render.remotion_renderer  # noqa: E402,F401
+else:
+    import app.media.render.manim_renderer  # noqa: E402,F401
 
 
 @shared_task(name="app.media.render.tasks.process_render_task")

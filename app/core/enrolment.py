@@ -158,7 +158,7 @@ def require_mode_enabled(course_id: str, mode: str) -> None:
     enrolled student.
 
     Fails OPEN if the column is missing, so this can be deployed before
-    sql/add_lecturer_role_and_course_ownership.sql without locking every
+    sql/003_add_lecturer_role_and_course_ownership.sql without locking every
     student out of Application mode mid-pilot.
     """
     if (mode or "").lower().strip() != "application":
@@ -176,7 +176,7 @@ def require_mode_enabled(course_id: str, mode: str) -> None:
     except Exception as exc:  # noqa: BLE001 — column may not exist yet
         logger.warning(
             "practice_mode_enabled lookup failed for %s; allowing Application "
-            "mode. Apply add_lecturer_role_and_course_ownership.sql: %s",
+            "mode. Apply 003_add_lecturer_role_and_course_ownership.sql: %s",
             course_id, exc,
         )
         return

@@ -41,8 +41,6 @@ logs/
 .coverage
 htmlcov/
 .tox/
-tests/
-scripts/
 docs/
 *.ini
 # IDE
@@ -70,6 +68,8 @@ TECHNICAL_DOCUMENTATION.md
 triggers.csv
 
 # Untracked
-sql/
 requirements-test.txt
 requirements.lock.txt
+# Remotion build deps
+remotion/node_modules/
+remotion/out/

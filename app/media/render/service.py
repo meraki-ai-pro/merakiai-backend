@@ -208,6 +208,32 @@ async def execute_render(asset_id: str) -> dict:
     return {"status": "ready", "asset_id": asset_id, "storage_path": path}
 
 
+def approved_concept_keys(course_id: str) -> list[str]:
+    """Concepts with an approved, rendered video on this course.
+
+    Fed into the board prompt so the model can only reference videos that
+    exist. Failures return an empty list rather than raising: a missing video
+    list must degrade to a normal Lesson Board answer, never fail the turn.
+    """
+    try:
+        rows = (
+            get_supabase()
+            .table("media_assets")
+            .select("concept_key")
+            .eq("course_id", course_id)
+            .eq("status", "ready")
+            .not_.is_("approved_at", "null")
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:  # noqa: BLE001 — table may not exist yet
+        logger.warning("Could not list approved videos for %s: %s", course_id, exc)
+        return []
+
+    return sorted({r["concept_key"] for r in rows if r.get("concept_key")})
+
+
 def playable_asset(course_id: str, concept_key: str) -> dict | None:
     """The approved video for a concept, with a playback URL. None if there
     is not one — the caller falls back to the Lesson Board."""
