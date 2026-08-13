@@ -15,6 +15,8 @@ pydantic[email]==2.13.1
 
 # ── Document parsing ──────────────────────────────────────────────────────────
 pypdf==6.10.1
+# Renders PDF pages to images for the formula-OCR step (app/ai/ingestion/math_ocr.py)
+pypdfium2==5.11.0
 python-docx==1.2.0
 unstructured==0.22.21
 beautifulsoup4==4.14.3
@@ -30,7 +32,12 @@ elevenlabs==2.43.0
 
 # ── Cloud / Infrastructure ────────────────────────────────────────────────────
 boto3==1.42.89
+# Imported directly by app/core/secrets.py, not just pulled in by boto3
+botocore==1.42.97
 requests==2.33.1
+# Used directly for the Cohere re-rank call (app/ai/rag/retriever.py). It also
+# arrives via openai/anthropic, but a transitive pin is not a contract.
+httpx==0.28.1
 
 # ── Task queue ────────────────────────────────────────────────────────────────
 celery==5.6.3
@@ -38,3 +45,11 @@ kombu==5.6.2
 redis==7.4.0
 websockets==15.0.1
 rabbitmq==0.2.0
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+# Kept here rather than a separate requirements-test.txt so a fresh clone can
+# run the suite without a second install step. pytest-asyncio is required by
+# the @pytest.mark.asyncio tests and is not imported anywhere, so it will not
+# show up in an import scan.
+pytest==9.1.1
+pytest-asyncio==1.4.0

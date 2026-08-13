@@ -1,0 +1,45 @@
+# Local development dependencies: Redis and RabbitMQ.
+#
+#   docker compose -p merakiai -f docker-compose.dev.yml up -d
+#
+# Deliberately no `container_name:`. Hard-coding "redis" and "rabbitmq" makes
+# them global names, so the stack fails to start whenever any other project on
+# the machine already owns one — including a stopped container from months ago.
+# Letting compose name them from the project prefix avoids that entirely.
+#
+# Redis is not only the Celery result backend. It also carries the WebSocket
+# relay (worker publishes, API forwards to the browser) and the query-embedding
+# cache, so answers get slower without it even though nothing breaks.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    command: redis-server --appendonly yes
+    volumes: ["redis_data:/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"    # broker — what Celery connects to
+      - "15672:15672"  # management UI, http://localhost:15672 (admin / root1234)
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: root1234
+    volumes: ["rabbitmq_data:/var/lib/rabbitmq"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:
+  rabbitmq_data:
