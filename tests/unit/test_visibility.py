@@ -190,6 +190,79 @@ class TestCaching:
         assert await vis.visible_document_ids("maths-101", "learn") is None
         assert await vis.visible_document_ids("maths-101", "review") == []
 
+    @pytest.mark.asyncio
+    async def test_a_publish_in_another_process_is_not_missed(self, docs, monkeypatch):
+        """The process that publishes is not the process that retrieves.
+
+        Publishing is an API route; retrieval runs in the Celery text worker.
+        `_cache` is per-process, so an in-process invalidate() clears the API's
+        copy and leaves the worker answering from a stale set for the rest of
+        the ten-minute TTL — the lecturer's own test-query panel shows the file
+        gone while students are still taught from it.
+
+        Here the local cache is deliberately NOT cleared: only the shared
+        generation moves, which is exactly what the other process's publish
+        looks like from this one.
+        """
+        generation = {"v": "1"}
+        monkeypatch.setattr(vis, "_current_generation", lambda _c: generation["v"])
+
+        calls = {"n": 0}
+        real = vis._fetch
+
+        def counted(c, m):
+            calls["n"] += 1
+            return real(c, m)
+
+        docs([doc("a", published=False)])
+        monkeypatch.setattr(vis, "_fetch", counted)
+
+        await vis.visible_document_ids("maths-101", "learn")
+        await vis.visible_document_ids("maths-101", "learn")
+        assert calls["n"] == 1, "second lookup should have been served from cache"
+
+        generation["v"] = "2"  # another process published
+        await vis.visible_document_ids("maths-101", "learn")
+        assert calls["n"] == 2, "a publish elsewhere must force a refetch here"
+
+    @pytest.mark.asyncio
+    async def test_redis_outage_degrades_to_the_ttl_rather_than_breaking(
+        self, docs, monkeypatch
+    ):
+        """Caching must never take retrieval down with it.
+
+        With no generation available every lookup carries the same None, so the
+        cache still works and the TTL is the only backstop — the behaviour this
+        had before the generation existed.
+        """
+        monkeypatch.setattr(vis, "_current_generation", lambda _c: None)
+
+        calls = {"n": 0}
+        real = vis._fetch
+
+        def counted(c, m):
+            calls["n"] += 1
+            return real(c, m)
+
+        docs([doc("a", published=False)])
+        monkeypatch.setattr(vis, "_fetch", counted)
+
+        assert await vis.visible_document_ids("maths-101", "learn") == []
+        assert await vis.visible_document_ids("maths-101", "learn") == []
+        assert calls["n"] == 1
+
+    def test_invalidate_survives_an_unreachable_redis(self, monkeypatch):
+        """A publish must not 500 because the generation could not be bumped."""
+        def boom():
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr(vis, "_get_redis", boom)
+        vis._cache[("maths-101", "learn")] = (0.0, "1", ["a"])
+
+        vis.invalidate("maths-101")  # must not raise
+
+        assert ("maths-101", "learn") not in vis._cache
+
 
 class TestTargetModeParsing:
     def test_absent_means_default_only(self):

@@ -137,16 +137,60 @@ class TestComposeHardening:
 
 
 class TestSubprocessEnvironmentIsScrubbed:
-    def test_only_safe_variables_are_passed_to_manim(self):
+    # Names the render subprocess may see. Everything here is a path or a
+    # platform fact; none is a credential. The Windows entries exist because
+    # CPython cannot start without SYSTEMROOT, so omitting them does not
+    # harden anything — it just stops manim running at all.
+    ALLOWED = {
+        "PATH", "HOME", "TMPDIR", "PYTHONDONTWRITEBYTECODE",
+        "TEMP", "TMP", "USERPROFILE",
+        "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATHEXT", "COMSPEC",
+        "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    }
+
+    def test_only_safe_variables_are_passed_to_manim(self, tmp_path, monkeypatch):
         """Generated code runs in this subprocess. os.environ of the parent
-        holds ANTHROPIC_API_KEY and the Supabase service-role key."""
+        holds ANTHROPIC_API_KEY and the Supabase service-role key.
+
+        Asserts on the environment actually built, not on the source text, so
+        the guarantee survives a refactor of how it is assembled.
+        """
+        from app.media.render.manim_renderer import _render_env
+
+        secrets = {
+            "ANTHROPIC_API_KEY": "sk-ant-must-not-leak",
+            "SUPABASE_SERVICE_ROLE_KEY": "service-role-must-not-leak",
+            "PINECONE_API_KEY": "pc-must-not-leak",
+            "OPENAI_API_KEY": "sk-must-not-leak",
+            "DID_API_KEY": "did-must-not-leak",
+            "ELEVENLABS_API_KEY": "el-must-not-leak",
+        }
+        for name, value in secrets.items():
+            monkeypatch.setenv(name, value)
+
+        env = _render_env(tmp_path)
+
+        assert set(env) <= self.ALLOWED, f"unexpected vars: {set(env) - self.ALLOWED}"
+        for name in secrets:
+            assert name not in env
+        # Also catch a secret smuggled in under an allowed name.
+        leaked = [v for v in secrets.values() if v in set(env.values())]
+        assert not leaked, f"secret value present in render env: {leaked}"
+
+        # The sandbox must still point scratch space at the throwaway workdir.
+        assert env["HOME"] == str(tmp_path)
+        assert env["TMPDIR"] == str(tmp_path)
+
+    def test_env_is_not_built_from_a_dict_literal_elsewhere(self):
+        """The subprocess env must come from _render_env, not an inline dict.
+
+        An inline `env={...}` at a second call site would bypass the checks
+        above without failing any of them.
+        """
         tree = ast.parse(_source("app/media/render/manim_renderer.py"))
-        env_keys: set[str] = set()
 
         for node in ast.walk(tree):
             if isinstance(node, ast.keyword) and node.arg == "env":
-                for key in node.value.keys:  # type: ignore[attr-defined]
-                    if isinstance(key, ast.Constant):
-                        env_keys.add(key.value)
-
-        assert env_keys == {"PATH", "HOME", "TMPDIR", "PYTHONDONTWRITEBYTECODE"}
+                assert isinstance(node.value, ast.Call), (
+                    "subprocess env should be built by _render_env()"
+                )

@@ -42,6 +42,13 @@ RENDER_TIMEOUT_SECONDS = int(os.getenv("MANIM_RENDER_TIMEOUT", "600"))
 # indistinguishable on a phone, which is what the pilot cohort will use.
 MANIM_QUALITY = os.getenv("MANIM_QUALITY", "-qm")
 
+# Which interpreter runs manim. Defaults to this process's own, which is right
+# inside the render container. Outside it, manim (and its cairo/pango/LaTeX
+# stack) is usually installed in a separate environment from the API's, so
+# point MANIM_PYTHON at that interpreter rather than installing a renderer's
+# worth of dependencies into the backend venv.
+MANIM_PYTHON = os.getenv("MANIM_PYTHON") or sys.executable
+
 _MAX_REPAIR_ATTEMPTS = int(os.getenv("MANIM_REPAIR_ATTEMPTS", "1"))
 
 
@@ -145,12 +152,43 @@ def _find_output(media_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _render_env(workdir: Path) -> dict[str, str]:
+    """The subprocess environment: the minimum manim needs, and nothing else.
+
+    Deliberately excludes every credential the parent process holds. On Windows
+    the minimum is larger than on Linux — CPython cannot initialise without
+    SYSTEMROOT (os.urandom and the socket/ssl machinery reach into system DLLs),
+    so `python -m manim` fails before manim's own code runs. Those variables
+    name system paths, not secrets.
+    """
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(workdir),
+        "TMPDIR": str(workdir),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+    if sys.platform == "win32":
+        env.update({
+            "TEMP": str(workdir),
+            "TMP": str(workdir),
+            "USERPROFILE": str(workdir),
+        })
+        for name in ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATHEXT", "COMSPEC",
+                     "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"):
+            value = os.environ.get(name)
+            if value:
+                env[name] = value
+
+    return env
+
+
 def _run_manim(scene_path: Path, scene_name: str, workdir: Path) -> tuple[int, str]:
     """Execute manim as a subprocess. Returns (exit code, combined output)."""
     import subprocess
 
     cmd = [
-        sys.executable, "-m", "manim",
+        MANIM_PYTHON, "-m", "manim",
         MANIM_QUALITY,
         "--disable_caching",          # cache reuse across scenes is a leak vector
         "--media_dir", str(workdir / "media"),
@@ -168,12 +206,7 @@ def _run_manim(scene_path: Path, scene_name: str, workdir: Path) -> tuple[int, s
             # An empty environment except for what manim genuinely needs. The
             # parent process holds ANTHROPIC_API_KEY, SUPABASE keys and the
             # Pinecone key; none of them should be readable by generated code.
-            env={
-                "PATH": os.environ.get("PATH", ""),
-                "HOME": str(workdir),
-                "TMPDIR": str(workdir),
-                "PYTHONDONTWRITEBYTECODE": "1",
-            },
+            env=_render_env(workdir),
         )
     except subprocess.TimeoutExpired:
         return 124, f"Render exceeded the {RENDER_TIMEOUT_SECONDS}s time limit."

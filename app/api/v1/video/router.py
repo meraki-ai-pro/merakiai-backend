@@ -60,9 +60,12 @@ class SdpAnswerRequest(BaseModel):
 
 class IceCandidateRequest(BaseModel):
     session_id: str
-    candidate: str
-    sdp_mid: str
-    sdp_mline_index: int
+    # All three are optional so the client can post the end-of-candidates
+    # signal (a null candidate), which D-ID needs in order to stop waiting for
+    # more and finish negotiating with what it already has.
+    candidate: str | None = None
+    sdp_mid: str | None = None
+    sdp_mline_index: int | None = None
 
 
 # ---------------------------------------------------------------------------

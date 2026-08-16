@@ -75,7 +75,33 @@ third worker if you are testing uploads:
   --queues=ingestion_tasks --concurrency=1 --pool=solo --loglevel=info
 ```
 
-## 6. Point the frontend at it
+## 6. Concept videos — a fourth worker, only if you need them
+
+Renders run on their own queue, and that worker **must** set `CELERY_INCLUDE`.
+Without it the task module is never imported, jobs sit unconsumed in the queue,
+and the worker logs `KeyError: app.media.render.tasks.process_render_task` —
+which reads like a broken queue rather than a missing environment variable.
+
+```bash
+CELERY_INCLUDE=app.media.render.tasks .venv/Scripts/python -m celery \
+  -A app.core.celery_app.celery_app worker \
+  --queues=render_tasks --concurrency=1 --pool=solo --loglevel=info
+```
+
+This worker also needs **manim** and a **LaTeX distribution** (the generated
+scenes use `MathTex`). Neither is in requirements.txt on purpose — only the
+render container needs them. If manim lives in its own virtualenv, point
+`MANIM_PYTHON` at that interpreter instead of installing a renderer's worth of
+dependencies into the backend venv:
+
+```bash
+MANIM_PYTHON=/path/to/manim-venv/Scripts/python.exe
+```
+
+Without LaTeX the render reaches manim and then dies with
+`FileNotFoundError: [WinError 2]` when manim tries to spawn `latex`.
+
+## 7. Point the frontend at it
 
 `merakiai-frontend/.env.local`:
 
@@ -164,7 +190,7 @@ drive the lecturer and assessment APIs directly.
 .venv/Scripts/python -m pytest tests/unit -q
 ```
 
-666 tests, no network or database needed, about 10 seconds.
+667 tests, no network or database needed, about 10 seconds.
 
 ## Database
 

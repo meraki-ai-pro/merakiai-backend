@@ -251,24 +251,37 @@ def submit_ice_candidate(
     agent_id: str,
     stream_id: str,
     *,
-    candidate: str,
-    sdp_mid: str,
-    sdp_mline_index: int,
+    candidate: str | None,
+    sdp_mid: str | None,
+    sdp_mline_index: int | None,
     did_session_id: str,
 ) -> None:
     """
     POST /agents/{agentId}/streams/{streamId}/ice
 
     Forwards a WebRTC ICE candidate from the frontend to D-ID.
+
+    The body is FLAT — candidate, sdpMid and sdpMLineIndex are siblings of
+    session_id, exactly as in D-ID's own reference client
+    (de-id/live-streaming-demo, streaming-client-api.js::onIceCandidate). This
+    was previously sent nested under a "candidate" object; D-ID answers 200
+    either way, so nothing failed loudly — it simply never learned our
+    candidates, no pair was ever formed, and ICE stalled at 'checking' before
+    dropping to 'disconnected'.
+
+    A null candidate is the end-of-candidates signal and is sent as session_id
+    alone, again per the reference. Without it D-ID keeps waiting for more
+    candidates instead of proceeding with the ones it has.
     """
-    payload = {
-        "candidate": {
+    if candidate is None:
+        payload: dict = {"session_id": did_session_id}
+    else:
+        payload = {
             "candidate": candidate,
-            "sdpMid": sdp_mid,
-            "sdpMLineIndex": sdp_mline_index,
-        },
-        "session_id": did_session_id,
-    }
+            "sdpMid": sdp_mid or "",
+            "sdpMLineIndex": sdp_mline_index or 0,
+            "session_id": did_session_id,
+        }
     r = requests.post(
         f"{DID_BASE_URL}/agents/{agent_id}/streams/{stream_id}/ice",
         json=payload,

@@ -62,7 +62,10 @@ async def upload_knowledge(
     request: Request,
     doc_type: str = "knowledge",
     default_mode: str = "learn",
-    difficulty: str = "beginner",
+    # Matches documents_difficulty_check (basic|intermediate|advanced);
+    # _resolve_difficulty still accepts 'beginner' as a synonym for callers
+    # that send it.
+    difficulty: str = "basic",
     version: str = "1",
     target_modes: str | None = None,
     topic: str | None = None,

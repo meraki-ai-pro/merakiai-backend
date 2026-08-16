@@ -36,16 +36,21 @@ def _resolve_default_mode(default_mode: str | None, doc_type: str) -> str:
 
 
 def _resolve_difficulty(difficulty: str | None) -> str:
-    allowed = {"beginner", "intermediate", "advanced"}
+    # 'basic', not 'beginner': documents_difficulty_check allows exactly
+    # basic|intermediate|advanced. This function used to emit 'beginner', which
+    # is not in that set, so every upload that did not name a difficulty was
+    # rejected by Postgres at insert time — the whole lecturer upload path.
+    allowed = {"basic", "intermediate", "advanced"}
     synonyms = {
-        "easy": "beginner",
+        "beginner": "basic",
+        "easy": "basic",
         "medium": "intermediate",
         "normal": "intermediate",
         "hard": "advanced",
     }
 
     if not difficulty:
-        return "beginner"
+        return "basic"
 
     normalized = difficulty.strip().lower()
     normalized = synonyms.get(normalized, normalized)
