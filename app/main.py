@@ -49,12 +49,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Meraki AI - AI Assistant Lecturer",
+    title="Meraki AI - AI Instructor",
     version="1.0.0",
     lifespan=lifespan,
 )
 
-_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")
+_raw_origins = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5173,http://localhost:3000,http://localhost:3001",
+)
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 # Vercel preview deployments get a unique subdomain per branch/PR

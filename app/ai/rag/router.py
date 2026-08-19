@@ -171,9 +171,32 @@ async def get_task_status(task_id: str, user=Depends(auth_guard)):
     return {"status": "processing"}
 
 
+@router.post("/transcribe")
+async def transcribe_voice_input(
+    file: UploadFile = File(...),
+    user=Depends(auth_guard),
+    _rl=Depends(rate_limit(max_calls=30, window_seconds=60)),
+):
+    """Transcribe voice input without dispatching a chat turn.
+
+    The frontend submits the returned text through the normal WebSocket path,
+    ensuring Learn, Practice, and Review share the same message lifecycle.
+    """
+    audio_bytes = await file.read(_MAX_AUDIO_BYTES + 1)
+    if len(audio_bytes) > _MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="Audio file exceeds the 25 MB limit.")
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio upload")
+
+    transcript = await asyncio.to_thread(transcribe_audio, audio_bytes, file.filename)
+    if not transcript.strip():
+        raise HTTPException(status_code=400, detail="No speech could be detected in the recording.")
+    return {"transcript": transcript.strip()}
+
+
 @router.post("/turn/voice")
 async def rag_turn_voice(
-    session_id: str,
+    session_id: str = Form(...),
     file: UploadFile = File(...),
     user=Depends(auth_guard),
     _rl=Depends(rate_limit(max_calls=30, window_seconds=60)),

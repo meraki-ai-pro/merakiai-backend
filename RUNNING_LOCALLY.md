@@ -110,9 +110,17 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 NEXT_PUBLIC_WS_URL=ws://localhost:8000
 ```
 
-The backend already allows `http://localhost:3000` through CORS by default. If
-you run Next on another port, set `ALLOWED_ORIGINS` in the backend `.env` to
-match, or the browser will block every request with no useful error.
+The frontend currently runs on port 3001. Configure the backend with:
+
+```bash
+ALLOWED_ORIGINS=http://localhost:3001
+PUBLIC_SITE_URL=http://localhost:3001
+```
+
+For production, replace that origin with the public frontend URL in both
+variables and add `<frontend-origin>/auth/reset-password` to Supabase Auth's
+allowed redirect URLs. If multiple frontend origins are active,
+`ALLOWED_ORIGINS` accepts a comma-separated list.
 
 ---
 

@@ -66,37 +66,46 @@ def list_sessions(
         .range(offset, offset + limit - 1)
         .execute()
     )
+    session_rows = rows.data or []
+    session_ids = [row["id"] for row in session_rows]
+    titles: dict[str, str] = {}
+    message_counts: dict[str, int] = {}
+
+    # Fetch the sidebar metadata in one request. The previous implementation
+    # issued two sequential queries per session (title + count), turning a
+    # 50-session sidebar into 101 Supabase round trips.
+    if session_ids:
+        conversation_rows = (
+            supabase.table("conversations")
+            .select("session_id,user_input")
+            .in_("session_id", session_ids)
+            .order("created_at", desc=True)
+            .range(0, 4999)
+            .execute()
+        )
+        for conversation in conversation_rows.data or []:
+            sid = conversation.get("session_id")
+            if not sid:
+                continue
+            message_counts[sid] = message_counts.get(sid, 0) + 1
+            raw = (conversation.get("user_input") or "").strip()
+            if raw and not raw.startswith("(system)"):
+                # Results are newest first. Reassigning leaves the oldest
+                # available real user prompt as the stable session title.
+                titles[sid] = raw
+
     sessions = []
-    for row in (rows.data or []):
+    for row in session_rows:
         sid = row["id"]
-        first_msg = (
-            supabase.table("conversations")
-            .select("user_input")
-            .eq("session_id", sid)
-            .order("created_at", desc=False)
-            .limit(1)
-            .execute()
-        )
-        title = None
-        if first_msg.data:
-            raw = first_msg.data[0]["user_input"] or ""
-            if not raw.startswith("(system)"):
-                title = raw[:60] + ("…" if len(raw) > 60 else "")
-        count_res = (
-            supabase.table("conversations")
-            .select("id", count="exact")
-            .eq("session_id", sid)
-            .execute()
-        )
-        msg_count = getattr(count_res, "count", None) or len(count_res.data or [])
+        title = titles.get(sid, "")
         sessions.append({
             "id": sid,
-            "title": title or "Session",
+            "title": (title[:60] + ("…" if len(title) > 60 else "")) if title else "Session",
             "mode": row.get("current_mode", "learn"),
             "current_mode": row.get("current_mode", "learn"),
             "prefers_video": row.get("prefers_video", False),
             "course_id": row.get("course_id"),
-            "message_count": msg_count,
+            "message_count": message_counts.get(sid, 0),
             "started_at": row.get("started_at"),
             "ended_at": row.get("ended_at"),
         })

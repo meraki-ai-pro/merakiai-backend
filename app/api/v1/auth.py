@@ -3,18 +3,25 @@ import os
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.auth import auth_guard, require_mfa_if_enrolled, security
 from app.core.rate_limit import rate_limit
 from app.db.supabase import get_supabase, get_supabase_anon
-from app.models.models import ForgotPasswordPayload, LoginPayload, SignUpPayload, UpdatePasswordPayload
+from app.models.models import (
+    ForgotPasswordPayload,
+    LoginPayload,
+    ResetPasswordPayload,
+    SignUpPayload,
+    UpdatePasswordPayload,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Auth (Supabase)"])
 
-PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "http://127.0.0.1:8000")
+PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "http://localhost:3001")
+recovery_security = HTTPBearer()
 
 
 def _validate_redirect_url(redirect_to: str | None, fallback: str) -> str:
@@ -138,6 +145,34 @@ def forgot_password(payload: ForgotPasswordPayload, _rl=Depends(rate_limit(max_c
         logger.error("Forgot-password error for email=%s: %s", payload.email, e)
         raise HTTPException(status_code=400, detail="If that email is registered, a reset link has been sent.")
     return {"status": "ok", "message": "If that email is registered, a reset link has been sent."}
+
+
+@router.post("/reset-password")
+def reset_password(
+    payload: ResetPasswordPayload,
+    credentials: HTTPAuthorizationCredentials = Depends(recovery_security),
+    _rl=Depends(rate_limit(max_calls=5, window_seconds=60)),
+):
+    """Set a new password for the user in a valid Supabase session."""
+    try:
+        response = get_supabase_anon().auth.get_user(credentials.credentials)
+        user = getattr(response, "user", None)
+        user_id = getattr(user, "id", None)
+        if not user_id:
+            raise ValueError("Recovery session has no user")
+
+        get_supabase().auth.admin.update_user_by_id(
+            user_id,
+            {"password": payload.new_password},
+        )
+    except Exception as e:
+        logger.warning("Password recovery failed: %s", e)
+        raise HTTPException(
+            status_code=401,
+            detail="This password reset link is invalid or has expired. Please request a new one.",
+        )
+
+    return {"status": "ok", "message": "Password updated successfully."}
 
 
 @router.get("/google/url")

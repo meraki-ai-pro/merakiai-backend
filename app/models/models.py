@@ -52,6 +52,10 @@ class ForgotPasswordPayload(BaseModel):
     redirect_to: AnyHttpUrl | None = None  # must be a valid URL; origin checked against ALLOWED_ORIGINS in route
 
 
+class ResetPasswordPayload(BaseModel):
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
 class AvatarSelectRequest(BaseModel):
     avatar_id: str = Field(..., max_length=100)
 

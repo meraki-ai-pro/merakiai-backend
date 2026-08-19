@@ -109,7 +109,7 @@ async def lecturer_guard(credentials: HTTPAuthorizationCredentials = Depends(sec
     role = _fetch_role(token, user.id)
     if role not in LECTURER_ROLES:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Lecturer privileges required"
+            status_code=status.HTTP_403_FORBIDDEN, detail="Instructor privileges required"
         )
     return {"id": user.id, "role": role, "email": user.email, "token": token}
 

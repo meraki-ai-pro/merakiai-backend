@@ -117,10 +117,8 @@ class RetrievedChunk:
 
     @property
     def location(self) -> str:
-        """Human-readable source label, e.g. 'notes.pdf, p. 7 — Limits'."""
+        """Student-safe source label without internal storage filenames."""
         parts: List[str] = []
-        if self.source_filename:
-            parts.append(self.source_filename)
         if self.page is not None:
             if self.page_end is not None and self.page_end != self.page:
                 parts.append(f"pp. {self.page}-{self.page_end}")
@@ -130,7 +128,7 @@ class RetrievedChunk:
         label = ", ".join(parts)
         if trail:
             label = f"{label} — {trail}" if label else trail
-        return label or "course material"
+        return label or "Course material"
 
     def to_source(self) -> Dict[str, Any]:
         """Serialisable form for the WebSocket payload and the client."""
