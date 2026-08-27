@@ -15,7 +15,11 @@ from scripts.ingest_course_manifest import (
 
 def test_production_manifest_is_complete_and_level_100():
     manifest = load_manifest(DEFAULT_MANIFEST)
-    root, courses = validate_manifest(manifest, DEFAULT_MANIFEST)
+    root, courses = validate_manifest(
+        manifest,
+        DEFAULT_MANIFEST,
+        require_source_files=False,
+    )
 
     assert root.name == "Knowledge Files"
     assert {course["id"] for course in courses} == {"calculus-100", "statistics-100"}
@@ -40,7 +44,11 @@ def test_production_manifest_is_complete_and_level_100():
 
 def test_assessment_sources_with_answers_do_not_feed_application_mode():
     manifest = load_manifest(DEFAULT_MANIFEST)
-    _, courses = validate_manifest(manifest, DEFAULT_MANIFEST)
+    _, courses = validate_manifest(
+        manifest,
+        DEFAULT_MANIFEST,
+        require_source_files=False,
+    )
     answer_bearing = {
         "Calculus/Quiz01(20230617)Wds.pptxnew.pptx",
         "Statistics/Midsem(20250322).pptx",

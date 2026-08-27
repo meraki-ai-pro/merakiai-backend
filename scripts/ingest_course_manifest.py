@@ -78,12 +78,17 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return payload
 
 
-def resolve_knowledge_root(manifest_path: Path, manifest: dict[str, Any]) -> Path:
+def resolve_knowledge_root(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    *,
+    require_exists: bool = True,
+) -> Path:
     configured = str(manifest.get("knowledge_root") or "").strip()
     if not configured:
         raise ValueError("knowledge_root is required")
     root = (manifest_path.parent / configured).resolve()
-    if not root.is_dir():
+    if require_exists and not root.is_dir():
         raise ValueError(f"Knowledge root does not exist: {root}")
     return root
 
@@ -114,7 +119,11 @@ def _source_path(root: Path, relative: str) -> Path:
 
 
 def validate_manifest(
-    manifest: dict[str, Any], manifest_path: Path, requested: list[str] | None = None
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    requested: list[str] | None = None,
+    *,
+    require_source_files: bool = True,
 ) -> tuple[Path, list[dict[str, Any]]]:
     if manifest.get("schema_version") != 1:
         raise ValueError("Unsupported schema_version; expected 1")
@@ -122,7 +131,11 @@ def validate_manifest(
     if not str(lecturer.get("email") or "").strip():
         raise ValueError("lecturer.email is required")
 
-    root = resolve_knowledge_root(manifest_path, manifest)
+    root = resolve_knowledge_root(
+        manifest_path,
+        manifest,
+        require_exists=require_source_files,
+    )
     courses = selected_courses(manifest, requested)
     seen_course_ids: set[str] = set()
     seen_sources: set[str] = set()
@@ -144,7 +157,7 @@ def validate_manifest(
         for document in documents:
             relative = str(document.get("path") or "")
             source = _source_path(root, relative)
-            if not source.is_file():
+            if require_source_files and not source.is_file():
                 raise ValueError(f"Missing source file: {relative}")
             if source.suffix.lower() not in ALLOWED_SUFFIXES:
                 raise ValueError(f"Unsupported source type: {relative}")
