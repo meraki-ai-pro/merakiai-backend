@@ -23,6 +23,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.sessions.router import router as sessions_router
 from app.api.v1.users.router import router as users_router
 from app.api.v1.feedback import router as feedback_router
+from app.api.v1.narration import router as narration_router
 from app.api.v1.enrolments import router as enrolments_router
 from app.api.v1.events import router as events_router
 from app.api.v1.assessments import router as assessments_router
@@ -85,7 +86,7 @@ app.add_middleware(
     allow_origin_regex=_vercel_origin_regex,
     allow_credentials=True,
     # M-8: explicit allowlists — never expose all methods/headers to all origins
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
 
@@ -117,6 +118,7 @@ app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(users_router)
 app.include_router(feedback_router)
+app.include_router(narration_router)
 app.include_router(enrolments_router)
 app.include_router(events_router)
 app.include_router(assessments_router)

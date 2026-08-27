@@ -1,17 +1,22 @@
 """Course-level analytics for the lecturer dashboard.
 
 Deliberately built from tables that exist today (enrolments, sessions,
-conversations, documents, media_assets, feedback). The richer research metrics
-— mastery progression, pre/post gains, video watch percentage — need the events
-stream and mastery_states from tasks #20 and #21, and are reported as
-unavailable rather than approximated. A plausible-looking number derived from
-the wrong table is worse than an honest gap in a study.
+conversations, documents, media_assets, mastery_states, events, feedback).
+Anything that cannot be measured from them is named in ``unavailable`` rather
+than approximated — a plausible-looking number derived from the wrong table is
+worse than an honest gap in a study.
+
+Two endpoints, and the split is the point. ``GET ""`` is the cohort rollup a
+lecturer reads at a glance; ``GET /mastery`` is the per-student breakdown they
+act on in a tutorial. Folding the second into the first would put a row per
+student behind every dashboard load.
 """
 
 from __future__ import annotations
 
 import logging
 from collections import Counter
+from datetime import datetime
 
 from fastapi import APIRouter, Depends
 
@@ -115,11 +120,69 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
         },
         "mastery": _mastery_summary(sb, course_id),
         "engagement": _engagement_summary(sb, course_id),
+        "time_on_task": _time_on_task(sessions),
         # Named explicitly so the dashboard shows "not yet measured" rather
         # than a zero the lecturer would read as "no learning happened".
-        # Shrinks as instrumentation lands: mastery and pre/post gains moved
-        # out of this list once #20/#21 shipped.
-        "unavailable": ["time_on_task"],
+        # Empty now that time-on-task is derived from session timestamps —
+        # kept as a field so the UI does not need a release to show the next
+        # metric that is not yet instrumented.
+        "unavailable": [],
+    }
+
+
+def _time_on_task(sessions: list[dict]) -> dict:
+    """Minutes actually spent studying, from session start/end timestamps.
+
+    Only CLOSED sessions count. An open session has no end time, and treating
+    "now" as the end would score a student who left a tab open overnight as the
+    most engaged in the cohort — which is precisely the number a lecturer would
+    act on and be wrong about.
+
+    The median is reported alongside the mean because the distribution is
+    heavily skewed: a handful of long sessions drag the mean well above what a
+    typical student does.
+    """
+    durations: list[float] = []
+    open_sessions = 0
+
+    for session in sessions:
+        started, ended = session.get("started_at"), session.get("ended_at")
+        if not ended:
+            open_sessions += 1
+            continue
+        try:
+            start = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            end = datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        minutes = (end - start).total_seconds() / 60
+        # Clamped: clock skew produces negatives, and a session longer than
+        # four hours is an abandoned tab that was eventually closed, not study.
+        if 0 < minutes <= 240:
+            durations.append(minutes)
+
+    if not durations:
+        return {
+            "measured": False,
+            "reason": "No completed sessions yet.",
+            "open_sessions": open_sessions,
+        }
+
+    ordered = sorted(durations)
+    middle = len(ordered) // 2
+    median = (
+        ordered[middle]
+        if len(ordered) % 2
+        else (ordered[middle - 1] + ordered[middle]) / 2
+    )
+
+    return {
+        "measured": True,
+        "completed_sessions": len(durations),
+        "open_sessions": open_sessions,
+        "total_minutes": round(sum(durations)),
+        "mean_minutes": round(sum(durations) / len(durations), 1),
+        "median_minutes": round(median, 1),
     }
 
 
@@ -144,11 +207,22 @@ def _mastery_summary(sb, course_id: str) -> dict:
         buckets[band(score)] += 1
         per_topic.setdefault(r["topic"], []).append(score)
 
-    weakest = sorted(
+    ranked = sorted(
         ({"topic": t, "mean": round(sum(v) / len(v), 3), "students": len(v)}
          for t, v in per_topic.items()),
         key=lambda x: x["mean"],
-    )[:5]
+    )
+
+    # Split by BAND, not by position in the ranking.
+    #
+    # Taking the bottom five and the top five puts the same topic in both lists
+    # whenever a course has five or fewer topics — which is every course early
+    # in a pilot. A lecturer then reads "chain rule" under both "needs
+    # reteaching" and "secure" and reasonably concludes the dashboard is
+    # broken. Splitting on the mastery band makes the two lists disjoint at any
+    # cohort size, and means what it says: these are weak, those are not.
+    weakest = [t for t in ranked if band(t["mean"]) != "secure"][:5]
+    strongest = [t for t in reversed(ranked) if band(t["mean"]) == "secure"][:5]
 
     return {
         "measured": True,
@@ -156,6 +230,7 @@ def _mastery_summary(sb, course_id: str) -> dict:
         "topics_tracked": len(per_topic),
         "bands": buckets,
         "weakest_topics": weakest,
+        "strongest_topics": strongest,
     }
 
 
@@ -181,6 +256,93 @@ def _engagement_summary(sb, course_id: str) -> dict:
         # the number that should drive what the lecturer uploads next.
         "empty_retrievals": counts.get("retrieval.empty", 0),
     }
+
+
+@router.get("/mastery")
+def mastery_breakdown(course_id: str, user=Depends(lecturer_guard)):
+    """Per-topic and per-student mastery, for the Overview mastery table.
+
+    The rollup in the main analytics answers "how is the cohort doing"; this
+    answers "which student needs help with what", which is the only version a
+    lecturer can act on in a tutorial.
+    """
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+
+    rows = _safe(
+        lambda: sb.table("mastery_states")
+        .select("student_id, topic, mastery_score, attempts_count, correct_count, "
+                "last_practised_at")
+        .eq("course_id", course_id).limit(20000).execute().data or [],
+        [],
+    )
+    if not rows:
+        return {"measured": False, "reason": "No graded attempts yet.", "topics": [], "students": []}
+
+    from app.core.mastery import band
+
+    profiles = {}
+    student_ids = list({r["student_id"] for r in rows})
+    if student_ids:
+        found = _safe(
+            lambda: sb.table("users").select("id, first_name, last_name, email")
+            .in_("id", student_ids).execute().data or [],
+            [],
+        )
+        profiles = {p["id"]: p for p in found}
+
+    per_topic: dict[str, list[dict]] = {}
+    per_student: dict[str, list[dict]] = {}
+    for row in rows:
+        score = float(row["mastery_score"])
+        entry = {**row, "band": band(score)}
+        per_topic.setdefault(row["topic"], []).append(entry)
+        per_student.setdefault(row["student_id"], []).append(entry)
+
+    topics = sorted(
+        (
+            {
+                "topic": topic,
+                "students": len(entries),
+                "mean": round(sum(float(e["mastery_score"]) for e in entries) / len(entries), 3),
+                "attempts": sum(int(e.get("attempts_count") or 0) for e in entries),
+                "bands": {
+                    b: sum(1 for e in entries if e["band"] == b)
+                    for b in ("secure", "developing", "struggling")
+                },
+            }
+            for topic, entries in per_topic.items()
+        ),
+        key=lambda t: t["mean"],
+    )
+
+    students = []
+    for student_id, entries in per_student.items():
+        profile = profiles.get(student_id, {})
+        name = " ".join(
+            p for p in (profile.get("first_name"), profile.get("last_name")) if p
+        ).strip()
+        mean = round(sum(float(e["mastery_score"]) for e in entries) / len(entries), 3)
+        students.append({
+            "student_id": student_id,
+            "name": name or None,
+            "email": profile.get("email"),
+            "topics_tracked": len(entries),
+            "mean": mean,
+            "band": band(mean),
+            "struggling_topics": sorted(
+                e["topic"] for e in entries if e["band"] == "struggling"
+            ),
+            "last_practised_at": max(
+                (e.get("last_practised_at") or "" for e in entries), default=None
+            ) or None,
+        })
+
+    # Weakest first. A lecturer opening this page is looking for who to help,
+    # not for a class ranking.
+    students.sort(key=lambda s: s["mean"])
+
+    return {"measured": True, "topics": topics, "students": students}
 
 
 @router.get("/knowledge-usage")

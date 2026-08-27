@@ -6,6 +6,13 @@ from typing import Any, Dict, List, Tuple, Optional, Callable, Awaitable
 from app.ai.rag.claude import generate_response
 from app.ai.rag.retriever import retrieve_context
 
+# The session_type an Assessment (application) session carries now that the
+# scenario-topic picker is gone. It is a placeholder, not a topic: nothing
+# should narrow retrieval or the prompt on the strength of it. Kept as a real
+# value rather than an empty string so existing rows, logs and the
+# mode_sessions.session_type column all stay non-null.
+GENERAL_SCENARIO = "general"
+
 
 # -------------------------
 # Static cached system prompts
@@ -352,14 +359,86 @@ def _ensure_expected_elements_shape(scenario: Dict[str, Any]) -> None:
 # REVIEW GENERATORS
 # =========================================================
 
+# Item-id prefixes, by format. The LLM is handed a "REV-MCQ-XXXX" template and
+# fills it in with whatever it likes — which, question after question, is
+# "0001". Numbering is the server's job, not the model's.
+_ID_PREFIX = {
+    "mcq": "REV-MCQ",
+    "fill_blank": "REV-FB",
+    "true_false": "REV-TF",
+    "short_answer": "REV-SA",
+}
+
+# fill_blank is the odd one out: its schema calls the field item_id.
+_ID_KEY = {"fill_blank": "item_id"}
+
+
+def _question_text(item: Dict[str, Any]) -> str:
+    """The one line that identifies a review item, whatever its format."""
+    return (
+        item.get("question")
+        or item.get("sentence_with_blank")
+        or item.get("statement")
+        or ""
+    ).strip()
+
+
+def asked_summary(item: Dict[str, Any]) -> Dict[str, str]:
+    """The minimum needed to avoid repeating an item: what it asked, about what.
+
+    The session stores these rather than whole items, so the history a
+    twenty-question review carries stays a few hundred bytes instead of
+    twenty full payloads.
+    """
+    return {
+        "question": _question_text(item),
+        "category": (item.get("category") or "").strip(),
+    }
+
+
+def _already_asked_block(asked: List[Dict[str, Any]]) -> str:
+    """Tell the generator what it has already used this session.
+
+    Without this the generator has no memory: every question in a session is
+    produced from the same course, the same difficulty band and the same
+    retrieved chunks, so it produces the same question. A ten-question review
+    asked one question ten times, reworded, with the options shuffled.
+
+    This goes in the USER message deliberately. The system prompts above are
+    byte-identical across all courses so a single cache entry serves every
+    call; putting per-session text in them would throw that away.
+    """
+    lines = []
+    for item in asked:
+        question = _question_text(item)
+        if question:
+            category = (item.get("category") or "").strip()
+            lines.append(f"- [{category}] {question}" if category else f"- {question}")
+    if not lines:
+        return ""
+    return (
+        "\n\nALREADY ASKED IN THIS SESSION:\n"
+        + "\n".join(lines)
+        + "\n\nDo NOT repeat any of the above, and do NOT reword one of them as a "
+        "new question. Pick a DIFFERENT idea from the reference material. If the "
+        "difficulty has risen, raise the demand of a NEW question rather than "
+        "restating an earlier one at greater length."
+    )
+
+
 async def generate_review_item(
     session_type: str,
     difficulty: str,
     course_id: str,
     course_name: str,
     difficulty_descriptors: Dict[str, Any],
+    asked: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], List[str]]:
-    """Generate one structured review item grounded in retrieved reference material."""
+    """Generate one structured review item grounded in retrieved reference material.
+
+    `asked` is every item already served in this session. It is what stops the
+    session asking the same question ten times; see _already_asked_block.
+    """
     session_type = (session_type or "").lower().strip()
     if session_type == "mcqs":
         session_type = "mcq"
@@ -367,17 +446,46 @@ async def generate_review_item(
         session_type = "true_false"
     difficulty = (difficulty or "").strip().title() or "Basic"
     diff_note = _difficulty_note(difficulty_descriptors, difficulty)
+    asked = list(asked or [])
 
     seed = f"{course_name} review assessment question type={session_type}, difficulty={difficulty}"
-    contexts = await retrieve_context(query=seed, mode="review", course_id=course_id, top_k=6)
+    # The lecturer tags Review uploads with the formats and level they suit;
+    # this is where that tagging is spent. Both are preferences, so a course
+    # whose files carry no tags retrieves exactly as it did before.
+    # An embedding query cannot express "not this" - asking for material
+    # "excluding limits" retrieves limits. So diversity is bought by breadth
+    # instead: give the generator more distinct material to choose from as the
+    # session goes on, and let _already_asked_block do the excluding.
+    top_k = min(6 + 2 * len(asked), 20)
+    contexts = await retrieve_context(
+        query=seed,
+        mode="review",
+        course_id=course_id,
+        top_k=top_k,
+        question_format=session_type,
+        difficulty=difficulty,
+    )
 
     ref = "\n".join(contexts)
     user_ctx = (
         f"Course: {course_name}\n"
         f"Difficulty: {difficulty}{diff_note}\n\n"
         f"REFERENCE MATERIAL:\n{ref}"
+        + _already_asked_block(asked)
     )
     _retry_suffix = "\n\nIMPORTANT: Output ONLY complete raw JSON. No markdown. Must be COMPLETE."
+
+    def _finish(item: Dict[str, Any]) -> Dict[str, Any]:
+        """Stamp the item with its real position in the session.
+
+        The model is handed a `REV-MCQ-XXXX` template and fills it in with
+        `0001` every time, so two different questions printed the same ID
+        to the student. Numbering is the server's job.
+        """
+        key = _ID_KEY.get(session_type, "question_id")
+        prefix = _ID_PREFIX.get(session_type, "REV")
+        item[key] = f"{prefix}-{len(asked) + 1:04d}"
+        return item
 
     if session_type == "mcq":
         sys_parts = _make_system(_SYS_MCQ)
@@ -391,7 +499,7 @@ async def generate_review_item(
             ),
             label="review_mcq",
         )
-        return item, contexts
+        return _finish(item), contexts
 
     if session_type == "fill_blank":
         sys_parts = _make_system(_SYS_FILL_BLANK)
@@ -405,7 +513,7 @@ async def generate_review_item(
             ),
             label="review_fill_blank",
         )
-        return item, contexts
+        return _finish(item), contexts
 
     if session_type == "true_false":
         sys_parts = _make_system(_SYS_TRUE_FALSE)
@@ -421,7 +529,7 @@ async def generate_review_item(
         )
         # Normalise is_correct to a Python bool regardless of what the LLM returned
         item["is_correct"] = bool(item.get("is_correct", True))
-        return item, contexts
+        return _finish(item), contexts
 
     # default: short_answer
     sys_parts = _make_system(_SYS_SHORT_ANSWER)
@@ -435,7 +543,7 @@ async def generate_review_item(
         ),
         label="review_short_answer",
     )
-    return item, contexts
+    return _finish(item), contexts
 
 
 async def evaluate_review_answer(
@@ -526,16 +634,18 @@ async def evaluate_review_answer(
 
 
 def format_review_prompt(item: Dict[str, Any]) -> str:
+    """Return only student-relevant prompt text.
+
+    Generation identifiers, difficulty and category remain in the structured
+    item stored by the mode session. They are operational metadata, not part
+    of the question, and exposing them makes the prompt harder to scan.
+    """
     itype = item.get("type")
 
     if itype == "mcq":
         opts = item["options"]
         opt_lines = "\n".join(f"{k}) {v}" for k, v in opts.items())
         return (
-            f"### REVIEW (MCQ)\n"
-            f"Question ID: {item.get('question_id', '')}\n"
-            f"Difficulty: {item.get('difficulty', '')}\n"
-            f"Category: {item.get('category', '')}\n\n"
             f"**Question:**\n{item['question']}\n\n"
             f"**Options:**\n{opt_lines}\n"
             f"\nReply with A, B, C, or D."
@@ -543,29 +653,17 @@ def format_review_prompt(item: Dict[str, Any]) -> str:
 
     if itype == "fill_blank":
         return (
-            f"### REVIEW (Fill-in)\n"
-            f"Item ID: {item.get('item_id', '')}\n"
-            f"Difficulty: {item.get('difficulty', '')}\n"
-            f"Category: {item.get('category', '')}\n\n"
             f"**Fill the blank:**\n{item['sentence_with_blank']}\n"
         )
 
     if itype == "true_false":
         return (
-            f"### REVIEW (True/False)\n"
-            f"Question ID: {item.get('question_id', '')}\n"
-            f"Difficulty: {item.get('difficulty', '')}\n"
-            f"Category: {item.get('category', '')}\n\n"
             f"**Statement:**\n{item['statement']}\n\n"
             f"Reply with **True** or **False**, then briefly explain your reasoning in 1–2 sentences."
         )
 
     # short_answer (default)
     return (
-        f"### REVIEW (Short Answer)\n"
-        f"Question ID: {item.get('question_id', '')}\n"
-        f"Difficulty: {item.get('difficulty', '')}\n"
-        f"Category: {item.get('category', '')}\n\n"
         f"**Question:**\n{item.get('question', '')}\n"
     )
 
@@ -581,22 +679,39 @@ async def generate_application_scenario(
     course_name: str,
     difficulty_descriptors: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], List[str]]:
-    """Generate a structured multi-step application scenario grounded in retrieved reference."""
+    """Generate a structured multi-step assessment scenario grounded in retrieved reference.
+
+    ``session_type`` is now almost always the neutral ``GENERAL_SCENARIO``: the
+    client removed the scenario-topic picker, because the five options on it
+    were generic labels that a student had no basis to choose between, and
+    picking one narrowed the retrieval seed to a slice of the course for no
+    pedagogical reason. Difficulty is the only dimension the student sets, and
+    it is matched against the level the lecturer tagged the material with.
+    """
     session_type = (session_type or "").lower().strip()
     difficulty = (difficulty or "").strip().title() or "Basic"
     diff_note = _difficulty_note(difficulty_descriptors, difficulty)
 
-    seed = f"{course_name} practice scenario type={session_type}, difficulty={difficulty}"
+    topical = session_type and session_type != GENERAL_SCENARIO
+    seed = (
+        f"{course_name} applied scenario type={session_type}, difficulty={difficulty}"
+        if topical
+        else f"{course_name} applied scenario, difficulty={difficulty}"
+    )
     contexts = await retrieve_context(
-        query=seed, mode="application", course_id=course_id, top_k=6
+        query=seed,
+        mode="application",
+        course_id=course_id,
+        top_k=6,
+        difficulty=difficulty,
     )
 
     ref = "\n".join(contexts)
     sys_parts = _make_system(_SYS_APP_GEN)
     user_msg = (
         f"Course: {course_name}\n"
-        f"Session type: {session_type}\n"
-        f"Difficulty: {difficulty}{diff_note}\n\n"
+        + (f"Session type: {session_type}\n" if topical else "")
+        + f"Difficulty: {difficulty}{diff_note}\n\n"
         f"REFERENCE MATERIAL:\n{ref}"
     )
     _retry_suffix = (
@@ -652,16 +767,17 @@ async def evaluate_application_answer(
 
 
 def format_application_prompt(scenario: Dict[str, Any], step: int) -> str:
+    """Format the scenario as context followed by one prominent question.
+
+    The structured scenario still retains its id, title, type and difficulty;
+    those fields are intentionally absent from the student-facing display.
+    """
     idx = step - 1
     data_lines = "\n".join(f"- {x}" for x in scenario.get("available_data", []))
     q = scenario["guided_questions"][idx]
 
     return (
-        f"### PRACTICE ({scenario.get('type', '')})\n"
-        f"Scenario ID: {scenario.get('scenario_id', '')}\n"
-        f"Title: {scenario.get('title', '')}\n"
-        f"Difficulty: {scenario.get('difficulty', '')}\n\n"
         f"**SITUATION:**\n{scenario.get('situation', '')}\n\n"
         f"**Available Data:**\n{data_lines}\n\n"
-        f"**Guided Question {step}:**\n{q}\n"
+        f"**Question:**\n{q}\n"
     )

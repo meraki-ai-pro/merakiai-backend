@@ -32,8 +32,13 @@ logger = logging.getLogger(__name__)
 # Set RAG_VISIBILITY_TTL=0 to disable caching entirely.
 _TTL_SECONDS = float(os.getenv("RAG_VISIBILITY_TTL", "600"))
 
-# (course_id, mode) -> (cached_at, generation, ids)
-_cache: dict[tuple[str, str], tuple[float, str | None, list[str] | None]] = {}
+# (course_id, mode) -> (cached_at, generation, rows)
+#
+# Rows, not ids. The per-student preference (question format, difficulty) is
+# applied on top of this and varies turn by turn, so caching a pre-filtered id
+# list would either miss constantly or serve one student's preference to
+# another. The tags travel with the rows and the narrowing is done in memory.
+_cache: dict[tuple[str, str], tuple[float, str | None, list[dict] | None]] = {}
 
 # Cross-process invalidation.
 #
@@ -77,8 +82,16 @@ def _current_generation(course_id: str) -> str | None:
         return None
 
 
-def _fetch(course_id: str, mode: str) -> list[str] | None:
-    """Document ids visible for this course and mode.
+_SELECT = "id, is_published, target_modes, status, deleted_at, difficulty, question_formats"
+
+# The columns as they were before sql/013. Selecting a column Postgres does not
+# have is a 400 for the whole query, so an un-migrated database must not lose
+# publish filtering as collateral damage.
+_SELECT_LEGACY = "id, is_published, target_modes, status, deleted_at"
+
+
+def _fetch(course_id: str, mode: str) -> list[dict] | None:
+    """Visible document rows for this course and mode, or None for "all".
 
     Returns None to mean "no filter needed" — either every document in the
     course is visible, or the schema predates this feature. None keeps the
@@ -87,27 +100,29 @@ def _fetch(course_id: str, mode: str) -> list[str] | None:
     """
     sb = get_supabase()
 
+    def _query(columns: str):
+        return (
+            sb.table("documents").select(columns)
+            .eq("course_id", course_id).execute().data or []
+        )
+
     try:
-        rows = (
-            sb.table("documents")
-            .select("id, is_published, target_modes, status, deleted_at")
-            .eq("course_id", course_id)
-            .execute()
-            .data
-            or []
-        )
-    except Exception as exc:  # noqa: BLE001 — columns may not exist yet
-        logger.warning(
-            "Visibility lookup failed for course=%s; retrieving unfiltered. "
-            "Apply 006_add_mode_aware_publishable_documents.sql: %s",
-            course_id, exc,
-        )
-        return None
+        rows = _query(_SELECT)
+    except Exception:  # noqa: BLE001 — sql/013 may not be applied
+        try:
+            rows = _query(_SELECT_LEGACY)
+        except Exception as exc:  # noqa: BLE001 — columns may not exist at all
+            logger.warning(
+                "Visibility lookup failed for course=%s; retrieving unfiltered. "
+                "Apply 006_add_mode_aware_publishable_documents.sql: %s",
+                course_id, exc,
+            )
+            return None
 
     if not rows:
         return None
 
-    visible: list[str] = []
+    visible: list[dict] = []
     filtered = False
 
     for row in rows:
@@ -128,7 +143,7 @@ def _fetch(course_id: str, mode: str) -> list[str] | None:
             filtered = True
             continue
 
-        visible.append(row["id"])
+        visible.append(row)
 
     if not filtered:
         return None
@@ -136,7 +151,7 @@ def _fetch(course_id: str, mode: str) -> list[str] | None:
     return visible
 
 
-def _lookup(course_id: str, mode: str) -> list[str] | None:
+def _lookup(course_id: str, mode: str) -> list[dict] | None:
     """Cache check, generation check and fetch — one thread hop, not three."""
     key = (course_id, mode)
     now = time.monotonic()
@@ -149,17 +164,82 @@ def _lookup(course_id: str, mode: str) -> list[str] | None:
         if hit and now - hit[0] < _TTL_SECONDS and hit[1] == generation:
             return hit[2]
 
-    ids = _fetch(course_id, mode)
+    rows = _fetch(course_id, mode)
 
     if _TTL_SECONDS > 0:
-        _cache[key] = (now, generation, ids)
+        _cache[key] = (now, generation, rows)
 
-    return ids
+    return rows
 
 
-async def visible_document_ids(course_id: str, mode: str) -> list[str] | None:
-    """Cached, non-blocking wrapper around :func:`_fetch`."""
-    return await asyncio.to_thread(_lookup, course_id, mode)
+def prefer(
+    rows: list[dict] | None,
+    *,
+    question_format: str | None = None,
+    difficulty: str | None = None,
+) -> list[dict] | None:
+    """Narrow to the documents the lecturer tagged for this exact ask.
+
+    A **preference**, not a filter, and the distinction is the whole design.
+    The tags are optional and most files will not carry them, so treating a
+    non-match as "not visible" would empty a course's Review material the first
+    time one lecturer ticked "Multiple Choice" on one file. Instead: if
+    anything matches, use only those; if nothing does, fall back to everything
+    visible for the mode, which is exactly the behaviour before tagging existed.
+
+    Untagged documents count as matching. A file with no formats listed is not
+    "unsuitable for MCQ", it is "unspecified", and the lecturer who uploaded it
+    before the field existed did not opt out of anything.
+    """
+    if not rows:
+        return rows
+
+    wanted_format = (question_format or "").strip().lower() or None
+    wanted_difficulty = (difficulty or "").strip().lower() or None
+    if not wanted_format and not wanted_difficulty:
+        return rows
+
+    def matches(row: dict) -> bool:
+        if wanted_format:
+            formats = row.get("question_formats")
+            if formats and wanted_format not in formats:
+                return False
+        if wanted_difficulty:
+            level = (row.get("difficulty") or "").strip().lower()
+            if level and level != wanted_difficulty:
+                return False
+        return True
+
+    preferred = [r for r in rows if matches(r)]
+    if not preferred:
+        logger.info(
+            "No documents tagged format=%s difficulty=%s — using all %d visible",
+            wanted_format, wanted_difficulty, len(rows),
+        )
+        return rows
+    return preferred
+
+
+async def visible_document_ids(
+    course_id: str,
+    mode: str,
+    *,
+    question_format: str | None = None,
+    difficulty: str | None = None,
+) -> list[str] | None:
+    """Cached, non-blocking wrapper around :func:`_fetch`.
+
+    ``question_format`` and ``difficulty`` come from what the student chose in
+    the mode picker and are matched against the lecturer's upload tags. Both
+    are preferences — see :func:`prefer`.
+    """
+    rows = await asyncio.to_thread(_lookup, course_id, mode)
+    if rows is None:
+        return None
+    return [
+        r["id"]
+        for r in prefer(rows, question_format=question_format, difficulty=difficulty)
+    ]
 
 
 def invalidate(course_id: str | None = None) -> None:

@@ -24,11 +24,14 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 from app.ai.rag.claude import generate_response
+from app.media.render.child_env import render_env
+from app.media.render.media_probe import binary, probe_duration
 from app.media.render.registry import RenderRequest, RenderResult, register_lazy
 from app.media.render.sandbox import UnsafeSceneError, validate_scene
 
@@ -51,6 +54,19 @@ MANIM_PYTHON = os.getenv("MANIM_PYTHON") or sys.executable
 
 _MAX_REPAIR_ATTEMPTS = int(os.getenv("MANIM_REPAIR_ATTEMPTS", "1"))
 
+# Playback stretch applied to the finished video, as a fraction of real time:
+# 0.85 plays it back 15% slower. The prompt above asks for humane pacing, but a
+# model reliably drifts back towards one-second animations and half-second
+# pauses — the chain-rule render shipped 26 animations with no run_time at all,
+# a visual change every 2.3 seconds. This is the deterministic half of the fix
+# and needs no cooperation from the model.
+#
+# Uniform, so nothing desynchronises: narration is generated afterwards from
+# the PROBED duration of the stretched file.
+#
+# Set MANIM_SPEED=1.0 to disable.
+MANIM_SPEED = float(os.getenv("MANIM_SPEED", "0.85"))
+
 
 _SCENE_SYSTEM = """You write Manim Community Edition scenes that teach one \
 mathematical concept clearly.
@@ -66,9 +82,19 @@ Code doing any of that is rejected before it runs.
 - The LaTeX preamble provides amsmath, amssymb, mathrsfs and xcolor only. Do \
 NOT use commands from physics, calligra, wasysym, dsfont or ragged2e \
 (\\dv, \\qty, \\mathds, \\Centering and similar) — they will fail to compile.
-- Build the idea in steps with self.play(...), and self.wait(1) between steps \
-so a student can read each one.
-- Keep the whole animation under {duration} seconds.
+- PACE IT FOR SOMEONE MEETING THIS FOR THE FIRST TIME. Generated lessons are \
+almost always TOO FAST to follow, and that is the single most common complaint \
+about them.
+  * Give EVERY self.play(...) an explicit run_time of at least 1.5 — use 2 to \
+2.5 for anything introducing new notation.
+  * Follow every step with self.wait(2), and self.wait(3) after a new equation, \
+a substitution, or any line the student has to read before the next change.
+  * Change ONE thing at a time. Two or three simultaneous transforms are \
+unreadable however long they last.
+  * Fewer, slower steps beat more, faster ones. A student who cannot keep up \
+learns nothing from the extra content.
+- Aim for roughly {duration} seconds and treat that as room to breathe, not a \
+budget to fill. Running short is fine; rushing to fit more in is not.
 - Keep every object inside the frame; prefer VGroup(...).arrange() over \
 hand-positioned coordinates.
 - Mathematical accuracy matters more than visual flourish. A wrong sign in a \
@@ -144,6 +170,51 @@ tex_template_file = tex_template.tex
 """
 
 
+def _slow_down(video: Path, speed: float) -> Path:
+    """Stretch playback so a first-time viewer can keep up.
+
+    Returns the original path unchanged when no stretch is wanted or ffmpeg
+    fails — a video that plays slightly fast is far better than no video, so
+    this never turns a successful render into a failed one.
+
+    Video-only: a Manim render carries no audio track. Narration is added
+    later, by a different worker, from the probed duration of whatever this
+    returns, so the two cannot drift apart.
+    """
+    if speed >= 0.999:
+        return video
+
+    out = video.with_name(f"{video.stem}-paced.mp4")
+    cmd = [
+        binary("ffmpeg"), "-y", "-i", str(video),
+        # setpts multiplies each frame's timestamp: 1/0.85 spaces them further
+        # apart, so the same frames play over a longer period. No re-timing of
+        # the animation itself and no frames dropped or invented.
+        "-filter:v", f"setpts={1 / speed:.4f}*PTS",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        str(out),
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=RENDER_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Could not slow the render down (%s); shipping it as rendered", exc)
+        return video
+
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        logger.warning(
+            "ffmpeg refused to slow the render down; shipping it as rendered: %s",
+            proc.stderr[-400:],
+        )
+        return video
+
+    logger.info("Paced render to %.0f%% speed", speed * 100)
+    return out
+
+
 def _find_output(media_dir: Path) -> Path | None:
     """Locate the rendered mp4. Manim nests it under quality-named folders."""
     candidates = sorted(
@@ -155,32 +226,11 @@ def _find_output(media_dir: Path) -> Path | None:
 def _render_env(workdir: Path) -> dict[str, str]:
     """The subprocess environment: the minimum manim needs, and nothing else.
 
-    Deliberately excludes every credential the parent process holds. On Windows
-    the minimum is larger than on Linux — CPython cannot initialise without
-    SYSTEMROOT (os.urandom and the socket/ssl machinery reach into system DLLs),
-    so `python -m manim` fails before manim's own code runs. Those variables
-    name system paths, not secrets.
+    Delegates to child_env.render_env, which both renderers share — Remotion
+    hit exactly the same Windows problem this function was written to fix, so
+    the rule now lives in one place.
     """
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": str(workdir),
-        "TMPDIR": str(workdir),
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
-
-    if sys.platform == "win32":
-        env.update({
-            "TEMP": str(workdir),
-            "TMP": str(workdir),
-            "USERPROFILE": str(workdir),
-        })
-        for name in ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATHEXT", "COMSPEC",
-                     "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"):
-            value = os.environ.get(name)
-            if value:
-                env[name] = value
-
-    return env
+    return render_env(workdir, {"PYTHONDONTWRITEBYTECODE": "1"})
 
 
 def _run_manim(scene_path: Path, scene_name: str, workdir: Path) -> tuple[int, str]:
@@ -202,6 +252,11 @@ def _run_manim(scene_path: Path, scene_name: str, workdir: Path) -> tuple[int, s
             cwd=str(workdir),
             capture_output=True,
             text=True,
+            # Same reason as the Remotion renderer: manim's progress bars and
+            # rich-formatted errors are not cp1252, and the decode happens on a
+            # reader thread where the failure is hard to attribute.
+            encoding="utf-8",
+            errors="replace",
             timeout=RENDER_TIMEOUT_SECONDS,
             # An empty environment except for what manim genuinely needs. The
             # parent process holds ANTHROPIC_API_KEY, SUPABASE keys and the
@@ -270,10 +325,18 @@ class ManimRenderer:
             if not video:
                 return "manim reported success but produced no video file."
 
+            video = _slow_down(video, MANIM_SPEED)
+
             return RenderResult(
                 content=video.read_bytes(),
                 media_type="video/mp4",
                 extension="mp4",
+                # Probed from the file rather than predicted from the scene.
+                # Manim decides the real length (self.wait calls, animation
+                # run_times), and leaving this None meant every Manim video
+                # showed no duration in the lecturer's review queue while
+                # Remotion ones did.
+                duration_seconds=probe_duration(video),
                 scene_code=source,
             )
         finally:

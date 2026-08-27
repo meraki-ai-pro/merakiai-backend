@@ -56,20 +56,69 @@ UNSUPPORTED_ARCHETYPES = frozenset({
 
 # Fallback when the lesson script names no archetype. This is where subject
 # finally gets a say — as a default, not a rule.
+# Ordered longest-key-first at match time (see route()), because these are
+# matched as substrings of a free-text course name and "mathematics" is a
+# substring of nothing while "mathematical biology" contains both "biology" and
+# a maths word.
 SUBJECT_DEFAULTS: dict[str, Renderer] = {
+    # Continuous, derivational — the animation IS the reasoning.
     "mathematics": "manim",
     "maths": "manim",
     "math": "manim",
     "calculus": "manim",
+    "algebra": "manim",
+    "geometry": "manim",
     "statistics": "manim",
+    "probability": "manim",
     "quantitative techniques": "manim",
+    "quantitative methods": "manim",
+    "econometrics": "manim",
     "physics": "manim",
+    "mechanics": "manim",
     "engineering": "manim",
+    "surveying": "manim",
+    # Discrete, composed, diagrammatic — designed motion over structured
+    # content, which is what Remotion is for.
     "computer science": "remotion",
+    "information technology": "remotion",
     "chemistry": "remotion",
+    "biochemistry": "remotion",
     "biology": "remotion",
+    "botany": "remotion",
+    "zoology": "remotion",
+    "microbiology": "remotion",
+    "anatomy": "remotion",
+    "physiology": "remotion",
+    "nursing": "remotion",
+    "medicine": "remotion",
+    "pharmacy": "remotion",
+    # "pharmacology" does not contain "pharmacy" — the substring match this
+    # table relies on is not a stemmer, and the missing entry sent every
+    # Pharmacology course to the DEFAULT_RENDERER (manim) in silence.
+    # scripts/check_concept_videos.py is what catches gaps like this.
+    "pharmacology": "remotion",
+    "pathology": "remotion",
+    "genetics": "remotion",
+    "ecology": "remotion",
+    "nutrition": "remotion",
+    "midwifery": "remotion",
+    "veterinary": "remotion",
+    "public health": "remotion",
+    "agriculture": "remotion",
+    "geography": "remotion",
+    "geology": "remotion",
+    "environmental science": "remotion",
     "economics": "remotion",
+    "accounting": "remotion",
+    "finance": "remotion",
+    "management": "remotion",
+    "marketing": "remotion",
     "business": "remotion",
+    "law": "remotion",
+    "history": "remotion",
+    "sociology": "remotion",
+    "psychology": "remotion",
+    "education": "remotion",
 }
 
 DEFAULT_RENDERER: Renderer = "manim"
@@ -106,12 +155,33 @@ def route(archetype: str | None = None, subject: str | None = None) -> Renderer:
     if subject_key:
         if subject_key in SUBJECT_DEFAULTS:
             return SUBJECT_DEFAULTS[subject_key]
-        # Free-text course names rarely match exactly.
-        for name, renderer in SUBJECT_DEFAULTS.items():
+        # Free-text course names rarely match exactly. Longest key first:
+        # "mathematical biology" contains "math" and "biology", and the more
+        # specific of the two is the one that describes the course.
+        for name in sorted(SUBJECT_DEFAULTS, key=len, reverse=True):
             if name in subject_key:
-                return renderer
+                return SUBJECT_DEFAULTS[name]
 
     return DEFAULT_RENDERER
+
+
+def render_queue(renderer: str) -> str:
+    """The Celery queue a renderer's jobs go to.
+
+    One queue PER RENDERER, not one shared ``render_tasks``.
+
+    Each render image registers only the renderer it carries — the Manim image
+    has no Node or Chromium, the Remotion image has no manim or LaTeX — so a
+    shared queue means whichever worker is free takes the next job regardless
+    of what that job needs. Deploy both (which a department teaching maths and
+    biology has to) and roughly half of all renders die with "No renderer
+    registered under 'manim'", which reads as a broken install rather than a
+    misrouted message.
+    """
+    key = (renderer or DEFAULT_RENDERER).strip().lower()
+    if key not in ("manim", "remotion"):
+        key = DEFAULT_RENDERER
+    return f"render_{key}"
 
 
 def known_archetypes() -> list[str]:

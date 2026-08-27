@@ -54,4 +54,4 @@ ENV TMPDIR=/tmp/renders \
     CELERY_INCLUDE=app.media.render.tasks
 
 CMD ["celery", "-A", "app.core.celery_app.celery_app", "worker", \
-     "--queues=render_tasks", "--concurrency=1", "--loglevel=info"]
+     "--queues=render_remotion", "--concurrency=1", "--loglevel=info"]

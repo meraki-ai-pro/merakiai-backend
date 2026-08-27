@@ -18,6 +18,53 @@ logger = logging.getLogger(__name__)
 # accepts the legacy 'practice' — see 001_allow_application_mode_in_document_chunks.sql
 _VALID_MODES = ("learn", "review", "application")
 
+# What a Review-mode file can be turned into. 'flashcard' is deliberately
+# absent — the client removed it from the student's question-format picker, so
+# tagging material for it would promise a format nothing can generate.
+_VALID_QUESTION_FORMATS = ("mcq", "fill_blank", "short_answer")
+
+_QUESTION_FORMAT_SYNONYMS = {
+    "multiple_choice": "mcq",
+    "multiple choice": "mcq",
+    "mcqs": "mcq",
+    "fill in the blank": "fill_blank",
+    "fill_in_the_blank": "fill_blank",
+    "fill-in-the-blank": "fill_blank",
+    "blank": "fill_blank",
+    "short answer": "short_answer",
+    "shortanswer": "short_answer",
+}
+
+
+def parse_question_formats(raw: str | None) -> list[str] | None:
+    """Parse the comma-separated ``question_formats`` upload parameter.
+
+    Returns None for "not specified", which retrieval reads as "this file can
+    serve any format" — the behaviour every file uploaded before this existed
+    already has.
+    """
+    if not raw or not raw.strip():
+        return None
+
+    formats = []
+    for part in raw.split(","):
+        key = part.strip().lower().replace("-", "_")
+        key = _QUESTION_FORMAT_SYNONYMS.get(key, _QUESTION_FORMAT_SYNONYMS.get(part.strip().lower(), key))
+        if key:
+            formats.append(key)
+
+    if not formats:
+        raise ValueError("question_formats cannot be empty")
+
+    unknown = [f for f in formats if f not in _VALID_QUESTION_FORMATS]
+    if unknown:
+        raise ValueError(
+            f"Unsupported question format(s): {', '.join(unknown)}. "
+            f"Allowed: {', '.join(_VALID_QUESTION_FORMATS)}"
+        )
+
+    return list(dict.fromkeys(formats))
+
 
 def _resolve_default_mode(default_mode: str | None, doc_type: str) -> str:
     mode_map = {"knowledge": "learn", "assessment": "review", "practice": "application"}
@@ -110,6 +157,7 @@ async def ingest_document(
     target_modes: list[str] | None = None,
     is_published: bool = True,
     topic: str | None = None,
+    question_formats: list[str] | None = None,
 ):
     doc_type = _resolve_doc_type(doc_type)
     default_mode = _resolve_default_mode(default_mode, doc_type)
@@ -136,6 +184,10 @@ async def ingest_document(
         "target_modes": target_modes or [default_mode],
         "is_published": is_published,
         "topic": topic,
+        # Only meaningful for Review material, and only stored when the
+        # lecturer actually chose formats. A NULL means "any format", which is
+        # what every file uploaded before this feature existed should keep.
+        "question_formats": question_formats or None,
     }
 
     # 1. Register document (FAST)
@@ -242,6 +294,7 @@ _CONTENT_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "doc": "application/msword",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
 

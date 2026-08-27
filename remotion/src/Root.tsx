@@ -1,7 +1,7 @@
 import React from 'react';
 import { Composition } from 'remotion';
 import { Lesson } from './Lesson';
-import { DEFAULT_SPEC, FPS, type LessonSpec } from './types';
+import { CHART_SECONDS, DEFAULT_SPEC, FPS, STEP_SECONDS, type LessonSpec } from './types';
 
 /**
  * Duration is computed from the spec, mirroring
@@ -12,9 +12,9 @@ import { DEFAULT_SPEC, FPS, type LessonSpec } from './types';
  */
 function durationInFrames(spec: LessonSpec): number {
   const fromSlides = spec.slides.reduce((total, s) => total + s.seconds, 0);
-  const fromSteps = spec.steps.length * 3;
-  const fromChart = spec.chart ? 6 : 0;
-  const seconds = 2.5 + fromSlides + fromSteps + fromChart + 1.5;
+  const fromSteps = spec.steps.length * STEP_SECONDS;
+  const fromChart = spec.chart ? CHART_SECONDS : 0;
+  const seconds = 3 + fromSlides + fromSteps + fromChart + 2.5;
   return Math.max(Math.round(seconds * FPS), FPS);
 }
 

@@ -28,13 +28,28 @@ MAX_SERIES = 4
 MAX_POINTS = 24
 MAX_TEXT = 240
 
+# Seconds each process/timeline step holds the screen.
+#
+# 4.5, not 3. Three seconds is enough to glance at a step label and nowhere
+# near enough to read a two-line explanation under it, which is what the client
+# meant by the videos being too fast. Mirrored by STEP_SECONDS in
+# remotion/src/types.ts — the two MUST agree or the CLI's frame range and the
+# composition's own duration disagree and the render fails.
+STEP_SECONDS = 4.5
+
+# A chart needs longer than a caption: the bars grow, and then it has to be
+# read.
+CHART_SECONDS = 8.0
+
 
 class Slide(BaseModel):
     title: str = Field(..., max_length=120)
     body: str | None = Field(None, max_length=MAX_TEXT)
     # Seconds on screen. Bounded because a lecturer cannot fix a 40-second
     # pause without a re-render.
-    seconds: float = Field(4, ge=1.5, le=15)
+    # Minimum 3, not 1.5. A slide is a title plus up to 240 characters of body;
+    # a second and a half is not long enough to read the title.
+    seconds: float = Field(5, ge=3, le=15)
 
 
 class Step(BaseModel):
@@ -103,10 +118,11 @@ class RemotionSpec(BaseModel):
     def duration_seconds(self) -> float:
         """Total runtime. Steps get a fixed beat; slides carry their own."""
         from_slides = sum(s.seconds for s in self.slides)
-        from_steps = len(self.steps) * 3.0
-        from_chart = 6.0 if self.chart else 0.0
-        # Title card plus a moment to read the last frame.
-        return round(2.5 + from_slides + from_steps + from_chart + 1.5, 2)
+        from_steps = len(self.steps) * STEP_SECONDS
+        from_chart = CHART_SECONDS if self.chart else 0.0
+        # Title card plus a moment to read the last frame. The tail is 2.5s
+        # rather than 1.5 so the closing frame can actually be read.
+        return round(3.0 + from_slides + from_steps + from_chart + 2.5, 2)
 
 
 def validate_spec(raw: dict) -> RemotionSpec:

@@ -137,7 +137,7 @@ class TestHybridRanking:
         # Visibility resolves against Postgres. Stubbed to None ("everything is
         # visible") so these tests exercise ranking only — without this they
         # make a live Supabase call per case.
-        async def all_visible(_course_id, _mode):
+        async def all_visible(_course_id, _mode, **_preferences):
             return None
 
         monkeypatch.setattr(retriever, "embed_query", embed)
@@ -285,7 +285,11 @@ class TestChunkPresentation:
             id="c", text="t", score=1,
             source_filename="notes.pdf", page=7, section_title="Limits",
         )
-        assert chunk.location == "notes.pdf, p. 7 — Limits"
+        # No filename. `location` is student-facing and deliberately omits the
+        # stored filename — the board cites "p. 7 — Limits", not the PDF sitting
+        # in the bucket. Verified in the browser: citations render as
+        # "Source 2: 1. The derivative as a limit".
+        assert chunk.location == "p. 7 — Limits"
 
     def test_location_renders_a_page_range(self):
         chunk = RetrievedChunk(
@@ -294,7 +298,7 @@ class TestChunkPresentation:
         assert "pp. 7-9" in chunk.location
 
     def test_location_degrades_for_legacy_chunks(self):
-        assert RetrievedChunk(id="c", text="t", score=1).location == "course material"
+        assert RetrievedChunk(id="c", text="t", score=1).location == "Course material"
 
     @pytest.mark.parametrize(
         "score,band", [(0.9, "high"), (0.5, "medium"), (0.1, "low")]

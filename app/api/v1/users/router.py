@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from app.core.auth import auth_guard
 from app.db.supabase import get_user_client
-from app.models.models import AvatarSelectRequest
+from app.models.models import AvatarSelectRequest, UpdateProfilePayload
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -9,17 +9,22 @@ _MAX_PROFILE_PIC_BYTES = 5 * 1024 * 1024  # 5 MB
 _ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
-@router.get("/me")
-def get_me(user=Depends(auth_guard)):
-    supabase = get_user_client(user["token"])
-    res = supabase.table("users").select("*").eq("id", user["id"]).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    row = res.data[0]
+def _profile_view(row: dict) -> dict:
+    """The profile shape every caller gets.
+
+    Whitelisted rather than returning the row: `users` also carries deletion
+    lifecycle columns and internal flags that the client has no use for and
+    that would become an accidental API contract the moment they were shipped.
+    """
     return {
         "id": row["id"],
         "email": row["email"],
         "role": row["role"],
+        "first_name": row.get("first_name"),
+        "last_name": row.get("last_name"),
+        "university_name": row.get("university_name"),
+        "region": row.get("region"),
+        "country": row.get("country"),
         "avatar_id": row.get("avatar_id"),
         "avatar_provider": row.get("avatar_provider"),
         "avatar_gender": row.get("avatar_gender"),
@@ -29,6 +34,35 @@ def get_me(user=Depends(auth_guard)):
         "profile_picture_url": row.get("profile_picture_url"),
         "created_at": row.get("created_at"),
     }
+
+
+@router.get("/me")
+def get_me(user=Depends(auth_guard)):
+    supabase = get_user_client(user["token"])
+    res = supabase.table("users").select("*").eq("id", user["id"]).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _profile_view(res.data[0])
+
+
+@router.patch("/me")
+def update_me(payload: UpdateProfilePayload, user=Depends(auth_guard)):
+    """Edit your own profile.
+
+    Written through the caller's own JWT, so RLS is the enforcement — the
+    service-role client would happily update any row if an id were ever
+    threaded through from a payload.
+    """
+    updates = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    supabase = get_user_client(user["token"])
+    res = supabase.table("users").update(updates).eq("id", user["id"]).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"status": "ok", "profile": _profile_view(res.data[0])}
+
 
 @router.post("/me/profile-picture")
 async def upload_profile_picture(

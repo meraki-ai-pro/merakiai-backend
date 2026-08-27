@@ -19,6 +19,10 @@ from app.ai.tasks import (
     process_mode_session_start_task,
     process_mode_session_turn_task,
 )
+# The same two rules the HTTP route enforces. Both paths start mode sessions,
+# and validation in only one of them is validation in neither.
+from app.ai.rag.modes_sessions.router import REVIEW_QUESTION_FORMATS
+from app.ai.rag.modes_sessions.service import GENERAL_SCENARIO
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +207,7 @@ async def websocket_endpoint(
                 await websocket.send_json({"status": "processing", "task_id": task.id})
 
             # ---------------------------------------------------------------
-            # mode_session_start — begin a Practice or Review session
+            # mode_session_start — begin an Assessment or Review session
             # ---------------------------------------------------------------
             elif msg_type == "mode_session_start":
                 mode         = (data.get("mode") or "").lower().strip()
@@ -215,6 +219,23 @@ async def websocket_endpoint(
                 if mode not in ("application", "review"):
                     await websocket.send_json({"error": "mode must be 'application' or 'review'"})
                     continue
+
+                if mode == "review":
+                    # The generator branches on this. Defaulting silently would
+                    # hand a student MCQs when they picked short answer.
+                    if session_type not in REVIEW_QUESTION_FORMATS:
+                        await websocket.send_json({
+                            "error": (
+                                "session_type must be one of "
+                                f"{', '.join(sorted(REVIEW_QUESTION_FORMATS))} for review"
+                            )
+                        })
+                        continue
+                else:
+                    # Assessment has no topic picker any more, so the client
+                    # sends nothing and the server supplies the placeholder —
+                    # mode_sessions.session_type is NOT NULL.
+                    session_type = session_type or GENERAL_SCENARIO
 
                 ms_row = await asyncio.to_thread(
                     _db_create_mode_session,

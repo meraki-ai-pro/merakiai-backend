@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 import os
+import re
+
 from elevenlabs import VoiceSettings
 from elevenlabs.client import ElevenLabs
+
+# The ElevenLabs dashboard lists an API key's **ID** next to it, and the secret
+# itself is shown exactly once — at creation or rotation. Copying the visible
+# one is therefore the natural mistake, and the resulting failure is opaque: a
+# 400 from deep inside a TTS or cloning call, hours after the change.
+#
+# An id is bare hex; a real key starts with "sk_". Matched narrowly so a future
+# change to ElevenLabs' key format cannot lock out a valid key.
+_LOOKS_LIKE_A_KEY_ID = re.compile(r"^[0-9a-f]{32,}$")
 
 # L-9: lazy-initialize — no client created at import time.
 # The module can now be imported even when ELEVENLABS_API_KEY is missing
@@ -18,6 +29,14 @@ def _get_eleven() -> ElevenLabs:
     api_key = get_key("ELEVENLABS_API_KEY")
     if not api_key:
         raise RuntimeError("ELEVENLABS_API_KEY is not set.")
+    if _LOOKS_LIKE_A_KEY_ID.match(api_key.strip()):
+        raise RuntimeError(
+            "ELEVENLABS_API_KEY looks like an API key ID, not an API key. "
+            "The dashboard shows the id in the key list; the key itself starts "
+            "with 'sk_' and is displayed only once, when it is created or "
+            "rotated. Rotate the key again and copy the value shown at that "
+            "moment."
+        )
     if _eleven is None or api_key != _eleven_key:
         _eleven = ElevenLabs(api_key=api_key)
         _eleven_key = api_key
