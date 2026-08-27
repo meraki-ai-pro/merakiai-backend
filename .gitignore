@@ -69,7 +69,7 @@ triggers.csv
 
 # Untracked
 requirements-test.txt
-requirements.lock.txt
+.venv-manim/
 # Remotion build deps
 remotion/node_modules/
 remotion/out/

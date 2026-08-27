@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt as _jwt
+import jwt as _jwt
+from jwt import InvalidTokenError
 
 from app.db.supabase import get_supabase, get_user_client
 
@@ -39,7 +40,7 @@ def _validate_token(credentials: HTTPAuthorizationCredentials):
             algorithms=[_ALGORITHM],
             options={"verify_aud": False},  # Supabase sets aud="authenticated"
         )
-    except JWTError:
+    except InvalidTokenError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",

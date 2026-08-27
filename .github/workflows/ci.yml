@@ -1,0 +1,45 @@
+name: Backend CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes --requirement requirements.lock.txt
+
+      - name: Run offline unit tests
+        run: python -m pytest tests/unit -q
+
+      - name: Audit installed dependencies
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit --progress-spinner off
+
+  container-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build production image
+        run: docker build --tag merakiai-backend:${{ github.sha }} .
