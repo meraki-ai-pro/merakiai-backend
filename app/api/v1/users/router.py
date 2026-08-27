@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from app.core.auth import auth_guard
+from app.core.auth import auth_guard, password_change_guard
 from app.db.supabase import get_user_client
 from app.models.models import AvatarSelectRequest, UpdateProfilePayload
 
@@ -37,7 +37,7 @@ def _profile_view(row: dict) -> dict:
 
 
 @router.get("/me")
-def get_me(user=Depends(auth_guard)):
+def get_me(user=Depends(password_change_guard)):
     supabase = get_user_client(user["token"])
     res = supabase.table("users").select("*").eq("id", user["id"]).execute()
     if not res.data:

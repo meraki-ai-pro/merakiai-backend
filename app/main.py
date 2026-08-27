@@ -60,6 +60,7 @@ _raw_origins = os.getenv(
     "http://localhost:5173,http://localhost:3000,http://localhost:3001",
 )
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_environment = os.getenv("APP_ENV", "development").strip().lower()
 
 # Vercel preview deployments get a unique subdomain per branch/PR
 # (e.g. yourapp-git-feature-abc-username.vercel.app).
@@ -78,6 +79,13 @@ _vercel_origin_regex = (
 # per-machine host allowlists.
 _raw_hosts = os.getenv("ALLOWED_HOSTS", "*")
 _allowed_hosts = [h.strip() for h in _raw_hosts.split(",") if h.strip()] or ["*"]
+
+if _environment == "production":
+    if "*" in _allowed_hosts:
+        raise RuntimeError("ALLOWED_HOSTS must be explicit when APP_ENV=production")
+    if not os.getenv("ALLOWED_ORIGINS", "").strip():
+        raise RuntimeError("ALLOWED_ORIGINS is required when APP_ENV=production")
+
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
 
 app.add_middleware(
@@ -89,6 +97,21 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    if forwarded_proto == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"
+        )
+    return response
 
 
 @app.exception_handler(Exception)

@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.auth import auth_guard, require_mfa_if_enrolled, security
+from app.core.auth import auth_guard, require_mfa_for_password_change, security
 from app.core.rate_limit import rate_limit
 from app.db.supabase import get_supabase, get_supabase_anon
 from app.models.models import (
@@ -139,6 +139,9 @@ def login(payload: LoginPayload, _rl=Depends(rate_limit(max_calls=10, window_sec
 
     return {
         "user": {"id": res.user.id, "email": res.user.email},
+        "must_change_password": bool(
+            (getattr(res.user, "user_metadata", None) or {}).get("must_change_password")
+        ),
         "access_token": res.session.access_token,
         "refresh_token": res.session.refresh_token,
         "expires_in": res.session.expires_in,
@@ -175,9 +178,11 @@ def reset_password(
         if not user_id:
             raise ValueError("Recovery session has no user")
 
+        metadata = dict(getattr(user, "user_metadata", None) or {})
+        metadata["must_change_password"] = False
         get_supabase().auth.admin.update_user_by_id(
             user_id,
-            {"password": payload.new_password},
+            {"password": payload.new_password, "user_metadata": metadata},
         )
     except Exception as e:
         logger.warning("Password recovery failed: %s", e)
@@ -297,7 +302,7 @@ def logout(
 @router.post("/update-password")
 def update_password(
     payload: UpdatePasswordPayload,
-    user=Depends(require_mfa_if_enrolled),
+    user=Depends(require_mfa_for_password_change),
     _rl=Depends(rate_limit(max_calls=5, window_seconds=300)),
 ):
     """Change your own password. Requires the current one.
@@ -322,7 +327,7 @@ def update_password(
         raise HTTPException(status_code=400, detail="This account has no email to verify against.")
 
     try:
-        get_supabase_anon().auth.sign_in_with_password({
+        reauthenticated = get_supabase_anon().auth.sign_in_with_password({
             "email": email,
             "password": payload.current_password,
         })
@@ -330,7 +335,14 @@ def update_password(
         raise HTTPException(status_code=401, detail="Your current password is incorrect.")
 
     try:
-        get_supabase().auth.admin.update_user_by_id(user["id"], {"password": payload.new_password})
+        metadata = dict(
+            getattr(getattr(reauthenticated, "user", None), "user_metadata", None) or {}
+        )
+        metadata["must_change_password"] = False
+        get_supabase().auth.admin.update_user_by_id(
+            user["id"],
+            {"password": payload.new_password, "user_metadata": metadata},
+        )
     except Exception as e:
         logger.error("Password update failed for user_id=%s: %s", user["id"], e)
         raise HTTPException(status_code=400, detail="Password update failed. Please try again.")
