@@ -169,6 +169,17 @@ class TestRenderWorkerConfiguration:
         assert "--queues=render_remotion" in _source("remotion.Dockerfile")
         assert "--queues=render_manim" not in _source("remotion.Dockerfile")
 
+    def test_remotion_uses_its_own_requirements(self):
+        dockerfile = _source("remotion.Dockerfile")
+        assert "requirements-remotion.txt" in dockerfile
+        assert "requirements-render.txt" not in dockerfile
+
+    def test_remotion_requirements_exclude_manim(self):
+        installed = _requirement_names("requirements-remotion.txt")
+        assert "manim" not in installed
+        for needed in ("celery", "supabase", "anthropic"):
+            assert needed in installed
+
     def test_the_worker_runs_one_render_at_a_time(self):
         """A render is CPU- and memory-bound; scale by containers, not threads."""
         assert "--concurrency=1" in _source("render.Dockerfile")
@@ -210,6 +221,26 @@ class TestComposeHardening:
     def test_retrieval_credentials_are_absent_from_the_render_environment(self):
         compose = _source("docker-compose.render.yml")
         for secret in ("PINECONE_API_KEY:", "OPENAI_API_KEY:", "SUPABASE_JWT_SECRET:"):
+            assert secret not in compose
+
+    def test_production_compose_runs_both_render_queues(self):
+        compose = _source("deploy/aws/docker-compose.render.production.yml")
+        assert "dockerfile: render.Dockerfile" in compose
+        assert "dockerfile: remotion.Dockerfile" in compose
+        assert "RENDERER: manim" in compose
+        assert "RENDERER: remotion" in compose
+
+    def test_production_renderers_are_hardened_and_bounded(self):
+        compose = _source("deploy/aws/docker-compose.render.production.yml")
+        assert compose.count("read_only: true") == 2
+        assert compose.count("no-new-privileges:true") == 2
+        assert compose.count("cap_drop:") == 2
+        assert compose.count("mem_limit:") == 2
+        assert compose.count("cpus:") == 2
+
+    def test_production_render_environment_excludes_retrieval_secrets(self):
+        compose = _source("deploy/aws/docker-compose.render.production.yml")
+        for secret in ("PINECONE_API_KEY", "OPENAI_API_KEY", "SUPABASE_JWT_SECRET"):
             assert secret not in compose
 
 

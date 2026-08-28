@@ -29,15 +29,15 @@ WORKDIR /app
 COPY remotion/package.json remotion/
 RUN cd remotion && npm install --omit=dev --no-audit --no-fund
 
-COPY requirements-render.txt .
-RUN pip install --no-cache-dir --break-system-packages -r requirements-render.txt
+COPY requirements-remotion.txt .
+RUN pip install --no-cache-dir --break-system-packages -r requirements-remotion.txt
 
 COPY remotion ./remotion
 COPY app ./app
 
-# Fetch the browser at build time. Doing it lazily would mean the first render
-# of the day silently spends minutes downloading Chromium.
-RUN cd remotion && npx --no-install remotion browser ensure || true
+# Fetch the browser at build time. Runtime has a read-only root filesystem, so
+# a missing browser must fail the image build instead of failing the first job.
+RUN cd remotion && npx --no-install remotion browser ensure
 
 RUN useradd --create-home --uid 10001 renderer \
     && mkdir -p /tmp/renders \

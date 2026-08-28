@@ -52,6 +52,23 @@ group. When the DNS record is proxied, restrict port 443 to Cloudflare's
 published IPv4 and IPv6 ranges and retain Systems Manager as the administrative
 path instead of opening SSH.
 
+Manim and Remotion run as two hardened Docker Compose services declared in
+`deploy/aws/docker-compose.render.production.yml`. The containers use host
+networking only so they can reach the loopback-only Redis and RabbitMQ services;
+neither exposes a listening port. `/etc/meraki/render.env` must be root-owned,
+mode `0600`, and contain only `REDIS_URL`, `RABBITMQ_URL`, `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`, and `ANTHROPIC_API_KEY`. Do not copy the complete
+application secret into this file.
+
+The deploy command tags both images with the tested commit SHA, rebuilds them
+after checkout, and keeps the previous tag available for rollback. Verify both
+queue consumers after deployment:
+
+```bash
+sudo rabbitmqctl list_consumers -p meraki_vhost queue_name consumer_tag -q \
+  | grep -E 'render_(manim|remotion)'
+```
+
 `/etc/meraki/backend.env` is intentionally small and root-owned:
 
 ```dotenv

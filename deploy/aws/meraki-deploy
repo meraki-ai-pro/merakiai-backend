@@ -45,6 +45,25 @@ if [[ ! -d "$APP_DIR/.git" || ! -x "$VENV_DIR/bin/python" ]]; then
 fi
 
 read -r -a services <<< "${SERVICES:-meraki-api meraki-celery-text meraki-celery-video meraki-celery-ingestion}"
+render_compose_file="${RENDER_COMPOSE_FILE:-}"
+render_env_file="${RENDER_ENV_FILE:-/etc/meraki/render.env}"
+render_project_name="${RENDER_PROJECT_NAME:-merakiai-render}"
+
+render_compose() {
+  local tag="$1"
+  shift
+  MERAKI_RENDER_TAG="$tag" MERAKI_RENDER_ENV_FILE="$render_env_file" \
+    docker compose --project-name "$render_project_name" \
+      --file "$render_compose_file" "$@"
+}
+
+if [[ -n "$render_compose_file" ]]; then
+  if [[ ! -f "$render_compose_file" || ! -r "$render_env_file" ]]; then
+    echo "Render compose file or environment file is missing" >&2
+    exit 78
+  fi
+  docker compose version >/dev/null
+fi
 lock_file="/run/lock/meraki-deploy-${environment}.lock"
 log_dir="/var/log/meraki"
 if [[ "$environment" == "uat" ]]; then
@@ -74,6 +93,9 @@ rollback() {
     sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
       --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
     systemctl restart "${services[@]}"
+    if [[ -n "$render_compose_file" ]]; then
+      render_compose "$previous_sha" up -d --remove-orphans || true
+    fi
     curl --fail --silent --show-error --retry 12 --retry-delay 5 \
       --retry-all-errors "$HEALTH_URL" >/dev/null || true
   fi
@@ -99,7 +121,14 @@ switched=1
 sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
   --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
 
+if [[ -n "$render_compose_file" ]]; then
+  render_compose "$commit_sha" build
+fi
+
 systemctl restart "${services[@]}"
+if [[ -n "$render_compose_file" ]]; then
+  render_compose "$commit_sha" up -d --remove-orphans
+fi
 curl --fail --silent --show-error --retry 12 --retry-delay 5 \
   --retry-all-errors "$HEALTH_URL" >/dev/null
 

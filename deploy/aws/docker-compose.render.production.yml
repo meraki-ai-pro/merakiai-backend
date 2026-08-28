@@ -1,0 +1,73 @@
+name: merakiai-render
+
+# Production animation workers. These are intentionally separate from the
+# ordinary video worker: renders are CPU-bound, can take minutes, and use their
+# own RabbitMQ queues so they cannot delay student responses or narration.
+services:
+  manim:
+    image: merakiai-render:${MERAKI_RENDER_TAG:-local}
+    build:
+      context: ../..
+      dockerfile: render.Dockerfile
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    env_file:
+      - ${MERAKI_RENDER_ENV_FILE:-/etc/meraki/render.env}
+    environment:
+      RENDERER: manim
+      CELERY_INCLUDE: app.media.render.tasks
+      MANIM_QUALITY: -qm
+      MANIM_RENDER_TIMEOUT: "600"
+      MANIM_SPEED: "0.85"
+      RENDER_NARRATION: "1"
+    read_only: true
+    tmpfs:
+      - /tmp/renders:rw,noexec,nosuid,size=1800m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1800m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 5m
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"
+
+  remotion:
+    image: merakiai-remotion:${MERAKI_RENDER_TAG:-local}
+    build:
+      context: ../..
+      dockerfile: remotion.Dockerfile
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    env_file:
+      - ${MERAKI_RENDER_ENV_FILE:-/etc/meraki/render.env}
+    environment:
+      RENDERER: remotion
+      CELERY_INCLUDE: app.media.render.tasks
+      REMOTION_PROJECT: /app/remotion
+      REMOTION_RENDER_TIMEOUT: "900"
+      REMOTION_DISABLE_TELEMETRY: "1"
+      RENDER_NARRATION: "1"
+    read_only: true
+    tmpfs:
+      - /tmp/renders:rw,noexec,nosuid,size=2g,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    cpus: 1.0
+    pids_limit: 384
+    stop_grace_period: 5m
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"
