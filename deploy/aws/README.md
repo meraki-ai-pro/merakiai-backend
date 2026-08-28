@@ -42,6 +42,9 @@ AWS_REGION=us-east-1
 AWS_SECRET_ARN=arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:prod/meraki/config-SUFFIX
 OPENAI_EMBEDDING_MODEL=text-embedding-3-large
 OPENAI_EMBEDDING_DIMENSIONS=3072
+# Set this when the Anthropic credential is identity-linked rather than a
+# standard Claude Platform Console API key.
+ANTHROPIC_WORKSPACE_ID=wrkspc_...
 ```
 
 Keep the embedding model and dimensions explicit in `/etc/meraki/backend.env`.

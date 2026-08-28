@@ -34,6 +34,8 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Sequence
 
+from app.ai.anthropic_config import client_options
+
 logger = logging.getLogger(__name__)
 
 Block = Dict[str, Any]
@@ -102,7 +104,7 @@ async def _transcribe_anthropic(image: bytes) -> Optional[str]:
     """Transcribe a page image with a Claude vision model."""
     from anthropic import AsyncAnthropic
 
-    client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    client = AsyncAnthropic(**client_options())
     model = os.getenv("MATH_OCR_MODEL", _DEFAULT_MODEL)
 
     response = await client.messages.create(
