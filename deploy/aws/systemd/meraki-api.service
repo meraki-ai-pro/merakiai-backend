@@ -1,0 +1,31 @@
+[Unit]
+Description=MerakiAI FastAPI service
+Wants=network-online.target
+After=network-online.target redis-server.service rabbitmq-server.service
+
+[Service]
+Type=simple
+User=meraki
+Group=meraki
+WorkingDirectory=/srv/meraki/merakiai-backend
+EnvironmentFile=/etc/meraki/backend.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/srv/meraki/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGTERM
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

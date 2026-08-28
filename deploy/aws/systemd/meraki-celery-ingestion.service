@@ -1,0 +1,31 @@
+[Unit]
+Description=MerakiAI Celery document ingestion worker
+Wants=network-online.target
+After=network-online.target redis-server.service rabbitmq-server.service
+
+[Service]
+Type=simple
+User=meraki
+Group=meraki
+WorkingDirectory=/srv/meraki/merakiai-backend
+EnvironmentFile=/etc/meraki/backend.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/srv/meraki/.venv/bin/python -m celery -A app.core.celery_app.celery_app worker --queues=ingestion_tasks --concurrency=1 --loglevel=info --hostname=ingestion@%H
+Restart=always
+RestartSec=5
+TimeoutStopSec=300
+KillSignal=SIGTERM
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

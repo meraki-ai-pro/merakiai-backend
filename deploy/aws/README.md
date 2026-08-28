@@ -15,6 +15,14 @@ sudo install -o root -g root -m 0755 \
 sudo install -o root -g root -m 0640 \
   /srv/meraki/merakiai-backend/deploy/aws/deploy-production.conf.example \
   /etc/meraki/deploy-production.conf
+
+sudo install -o root -g root -m 0644 \
+  /srv/meraki/merakiai-backend/deploy/aws/systemd/*.service \
+  /etc/systemd/system/
+sudo install -o root -g root -m 0644 \
+  /srv/meraki/merakiai-backend/deploy/aws/nginx/merakiai-api.conf \
+  /etc/nginx/sites-available/merakiai-api
+sudo systemctl daemon-reload
 ```
 
 Edit the installed configuration to match the real checkout, virtualenv,
@@ -36,6 +44,27 @@ AWS_SECRET_ARN=arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:prod/meraki/co
 
 The JSON secret must follow `.env.example`. In particular, use
 `SUPABASE_SERVICE_ROLE_KEY`; `SUPABASE_KEY` is not read by this application.
+
+The four application services bind only to loopback. Nginx is the sole public
+origin listener and terminates TLS with the certificate paths declared in
+`deploy/aws/nginx/merakiai-api.conf`. Keep port 8000 closed in the EC2 security
+group. When the DNS record is proxied, restrict port 443 to Cloudflare's
+published IPv4 and IPv6 ranges and retain Systems Manager as the administrative
+path instead of opening SSH.
+
+`/etc/meraki/backend.env` is intentionally small and root-owned:
+
+```dotenv
+APP_ENV=production
+AWS_REGION=us-east-1
+AWS_SECRET_ARN=arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:prod/meraki/config-SUFFIX
+```
+
+The API service starts two Uvicorn workers. Text, video, and ingestion queues
+have dedicated Celery workers so long-running media or document work cannot
+starve student answers. Concept-video render workers remain containerized using
+the dedicated render Dockerfiles; do not run generated Manim code in these host
+services.
 
 ## GitHub OIDC role
 
