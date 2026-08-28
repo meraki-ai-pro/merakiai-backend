@@ -217,10 +217,9 @@ async def embed_query(query: str) -> List[float]:
         return _normalize_embedding(cached)
 
     client = _get_openai()
-    response = await client.embeddings.create(
-        model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
-        input=query,
-    )
+    from app.ai.embedding_config import request_options
+
+    response = await client.embeddings.create(input=query, **request_options())
     embedding = response.data[0].embedding
 
     # Not awaited: the answer does not depend on the cache write landing.

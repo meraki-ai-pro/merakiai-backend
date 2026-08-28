@@ -11,12 +11,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
+import httpx
+import jwt
 from fastapi import UploadFile
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -53,6 +56,22 @@ def arguments() -> argparse.Namespace:
         help="Create missing courses and enqueue selected documents as drafts.",
     )
     parser.add_argument("--wait-minutes", type=int, default=45)
+    parser.add_argument(
+        "--api-url",
+        default="",
+        help=(
+            "Upload through the deployed API (for example https://api.merakiai.online) "
+            "so production Celery receives the jobs."
+        ),
+    )
+    parser.add_argument(
+        "--retry-stalled",
+        action="store_true",
+        help=(
+            "Before an API upload, hard-delete only matching draft documents that are "
+            "still processing with zero chunks."
+        ),
+    )
     parser.add_argument(
         "--remove-froth-after-verify",
         action="store_true",
@@ -327,6 +346,151 @@ async def enqueue_documents(
     return document_ids
 
 
+def _temporary_api_token(lecturer: dict[str, Any]) -> str:
+    """Mint a short-lived upload token without changing the lecturer password."""
+    secret = os.environ.get("SUPABASE_JWT_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError("SUPABASE_JWT_SECRET is required for --api-url")
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "sub": lecturer["id"],
+            "email": lecturer["email"],
+            "aud": "authenticated",
+            "role": "authenticated",
+            "iat": now,
+            "exp": now + 60 * 60,
+            "aal": "aal1",
+            "user_metadata": {"must_change_password": False},
+        },
+        secret,
+        algorithm="HS256",
+    )
+
+
+def remove_stalled_documents(
+    supabase, courses: list[dict[str, Any]]
+) -> list[str]:
+    """Remove only known zero-work rows left by an undelivered broker task."""
+    removed: list[str] = []
+    for course in courses:
+        for document in course["documents"]:
+            if not document["ingest"]:
+                continue
+            filename = Path(document["path"]).name
+            rows = (
+                supabase.table("documents")
+                .select("id,status,total_chunks,is_published,deleted_at")
+                .eq("course_id", course["id"])
+                .eq("source_filename", filename)
+                .execute()
+                .data
+                or []
+            )
+            if not rows:
+                continue
+            if len(rows) != 1:
+                raise RuntimeError(
+                    f"Expected one stalled row for {course['id']}/{filename}; found {len(rows)}"
+                )
+            row = rows[0]
+            chunks = (
+                supabase.table("document_chunks")
+                .select("document_id", count="exact")
+                .eq("document_id", row["id"])
+                .limit(1)
+                .execute()
+            )
+            chunk_count = int(getattr(chunks, "count", 0) or 0)
+            safe = (
+                row.get("status") == "processing"
+                and int(row.get("total_chunks") or 0) == 0
+                and chunk_count == 0
+                and not row.get("is_published")
+                and not row.get("deleted_at")
+            )
+            if not safe:
+                raise RuntimeError(
+                    f"Refusing to remove non-stalled document {course['id']}/{filename}: "
+                    f"status={row.get('status')} total_chunks={row.get('total_chunks')} "
+                    f"chunk_rows={chunk_count} published={row.get('is_published')}"
+                )
+            supabase.table("documents").delete().eq("id", row["id"]).execute()
+            removed.append(row["id"])
+            print(f"STALE ROW REMOVED  {course['id']}/{filename}")
+    return removed
+
+
+def enqueue_documents_via_api(
+    supabase,
+    root: Path,
+    courses: list[dict[str, Any]],
+    lecturer: dict[str, Any],
+    api_url: str,
+) -> list[str]:
+    """Upload over HTTPS so the deployed API dispatches to its local broker."""
+    base_url = api_url.strip().rstrip("/")
+    if not base_url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+        raise RuntimeError("--api-url must use HTTPS (except localhost development)")
+    token = _temporary_api_token(lecturer)
+    document_ids: list[str] = []
+    with httpx.Client(
+        base_url=base_url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=httpx.Timeout(180.0, connect=20.0),
+        follow_redirects=False,
+    ) as client:
+        for course in courses:
+            for document in course["documents"]:
+                if not document["ingest"]:
+                    continue
+                source = _source_path(root, document["path"])
+                existing = _existing_document(supabase, course["id"], source.name)
+                if existing:
+                    if existing.get("status") != "ready":
+                        raise RuntimeError(
+                            f"Existing document {source.name} is {existing.get('status')}; "
+                            "use --retry-stalled only for verified zero-chunk rows"
+                        )
+                    print(f"DOCUMENT READY  {course['id']}/{source.name}")
+                    document_ids.append(existing["id"])
+                    continue
+
+                params = {
+                    "doc_type": document["doc_type"],
+                    "default_mode": document["default_mode"],
+                    "difficulty": document["difficulty"],
+                    "version": "1",
+                    "target_modes": ",".join(document["target_modes"]),
+                    "topic": document["topic"],
+                    "is_published": "false",
+                }
+                if document["question_formats"]:
+                    params["question_formats"] = ",".join(document["question_formats"])
+                with source.open("rb") as handle:
+                    response = client.post(
+                        f"/lecturer/courses/{course['id']}/knowledge",
+                        params=params,
+                        files={
+                            "file": (
+                                source.name,
+                                handle,
+                                "application/octet-stream",
+                            )
+                        },
+                    )
+                if response.status_code != 200:
+                    detail = response.text[:500].replace("\n", " ")
+                    raise RuntimeError(
+                        f"API upload failed for {course['id']}/{source.name}: "
+                        f"HTTP {response.status_code} {detail}"
+                    )
+                payload = response.json()
+                document_ids.append(payload["document_id"])
+                print(f"DOCUMENT QUEUED VIA API  {course['id']}/{source.name}")
+    return document_ids
+
+
 def wait_for_documents(supabase, document_ids: list[str], wait_minutes: int) -> None:
     deadline = time.monotonic() + max(1, wait_minutes) * 60
     pending = set(document_ids)
@@ -446,6 +610,8 @@ def print_plan(root: Path, courses: list[dict[str, Any]]) -> None:
 
 def main() -> int:
     args = arguments()
+    if args.retry_stalled and not args.api_url:
+        raise SystemExit("--retry-stalled requires --api-url")
     if args.remove_froth_after_verify and args.courses:
         raise SystemExit(
             "Froth cleanup requires verification of the complete Statistics and Calculus manifest; "
@@ -467,7 +633,15 @@ def main() -> int:
     supabase = get_supabase()
     lecturer = _lecturer_profile(supabase, manifest["lecturer"]["email"])
     ensure_courses(supabase, courses, lecturer["id"])
-    document_ids = asyncio.run(enqueue_documents(supabase, root, courses, lecturer["id"]))
+    if args.retry_stalled:
+        removed = remove_stalled_documents(supabase, courses)
+        print(f"STALE ROW CLEANUP VERIFIED  removed={len(removed)}")
+    if args.api_url:
+        document_ids = enqueue_documents_via_api(
+            supabase, root, courses, lecturer, args.api_url
+        )
+    else:
+        document_ids = asyncio.run(enqueue_documents(supabase, root, courses, lecturer["id"]))
     wait_for_documents(supabase, document_ids, args.wait_minutes)
     namespace_counts = verify_corpus(supabase, courses)
     if args.remove_froth_after_verify:

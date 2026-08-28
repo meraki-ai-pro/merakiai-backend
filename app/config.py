@@ -9,6 +9,8 @@ _REQUIRED_PRODUCTION_SETTINGS = (
     "SUPABASE_SERVICE_ROLE_KEY",
     "SUPABASE_JWT_SECRET",
     "OPENAI_API_KEY",
+    "OPENAI_EMBEDDING_MODEL",
+    "OPENAI_EMBEDDING_DIMENSIONS",
     "ANTHROPIC_API_KEY",
     "PINECONE_API_KEY",
     "PINECONE_INDEX",
@@ -26,6 +28,12 @@ def _validate_production_settings() -> None:
         raise RuntimeError(
             "Missing required production configuration: " + ", ".join(missing)
         )
+
+    # Parse here so a typo fails the service before the first paid embedding
+    # call and before a background ingestion job can be marked failed.
+    from app.ai.embedding_config import request_options
+
+    request_options()
 
 
 def load_env() -> None:

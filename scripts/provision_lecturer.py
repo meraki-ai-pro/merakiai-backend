@@ -54,6 +54,27 @@ def _find_user(client, email: str):
     )
 
 
+def _active_avatar_id(client) -> str:
+    """Return a valid default avatar required by the public users trigger."""
+    bundles = (
+        client.table("avatar_voice_bundles")
+        .select("avatar_id,is_active")
+        .execute()
+        .data
+        or []
+    )
+    avatar_id = next(
+        (bundle.get("avatar_id") for bundle in bundles if bundle.get("is_active")),
+        None,
+    )
+    if not avatar_id:
+        raise SystemExit(
+            "No active avatar_voice_bundles row is available; "
+            "a lecturer profile cannot be provisioned safely."
+        )
+    return str(avatar_id)
+
+
 def main() -> int:
     args = _arguments()
     email = args.email.strip().lower()
@@ -75,6 +96,9 @@ def main() -> int:
         raise SystemExit("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
 
     client = create_client(url, service_key)
+    # Resolve the required public-profile dependency before mutating auth so a
+    # missing avatar cannot leave a newly-created identity only half provisioned.
+    avatar_id = _active_avatar_id(client)
     existing = _find_user(client, email)
     temporary_password = secrets.token_urlsafe(32)
     metadata = dict(getattr(existing, "user_metadata", None) or {})
@@ -112,6 +136,7 @@ def main() -> int:
         "last_name": args.last_name.strip(),
         "country": args.country.strip() or "Ghana",
         "role": "lecturer",
+        "avatar_id": avatar_id,
     }
     if args.institution.strip():
         profile["university_name"] = args.institution.strip()

@@ -41,11 +41,25 @@ jobs:
 
   container-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: backend
+            dockerfile: Dockerfile
+          - name: manim-renderer
+            dockerfile: render.Dockerfile
+          - name: remotion-renderer
+            dockerfile: remotion.Dockerfile
     steps:
       - uses: actions/checkout@v7
-      - name: Build production image
-        run: docker build --tag merakiai-backend:${{ github.sha }} .
+      - name: Build ${{ matrix.image.name }} production image
+        run: >-
+          docker build
+          --file ${{ matrix.image.dockerfile }}
+          --tag merakiai-${{ matrix.image.name }}:${{ github.sha }}
+          .
 
   deploy-uat:
     name: Deploy to UAT

@@ -32,6 +32,8 @@ import logging
 import os
 from collections import OrderedDict
 
+from app.ai.embedding_config import cache_namespace
+
 logger = logging.getLogger(__name__)
 
 # Bounded so a long-lived worker cannot grow without limit. 512 x 3072 floats
@@ -44,14 +46,15 @@ _lru: OrderedDict[str, list[float]] = OrderedDict()
 # expire at all is to stop Redis growing forever.
 _REDIS_TTL = int(os.getenv("EMBED_CACHE_TTL", str(7 * 24 * 3600)))
 
-_KEY_PREFIX = "emb:v1:"
+_KEY_PREFIX = "emb:v2:"
 
 _redis = None
 _redis_unavailable = False
 
 
 def _key(text: str) -> str:
-    return _KEY_PREFIX + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    payload = f"{cache_namespace()}\n{text}"
+    return _KEY_PREFIX + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _get_redis():

@@ -43,6 +43,9 @@ logs/
 htmlcov/
 .tox/
 docs/
+!docs/
+docs/*
+!docs/LEARN_ANIMATION_VIDEO_PLAN.md
 *.ini
 # IDE
 .vscode/
