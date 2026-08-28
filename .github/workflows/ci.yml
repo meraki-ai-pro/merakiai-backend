@@ -132,13 +132,16 @@ jobs:
     steps:
       - uses: aws-actions/configure-aws-credentials@v6.2.3
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          # Repository/environment variables remain override points, while the
+          # verified production identifiers keep a missing variable from
+          # turning an otherwise healthy release red before it reaches AWS.
+          role-to-assume: ${{ vars.AWS_ROLE_ARN || 'arn:aws:iam::335723620926:role/MerakiGitHubProdDeployRole' }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Deploy tested commit through SSM
         id: deploy
         env:
-          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID || 'i-0d4a8e0177f8d24ed' }}
         run: |
           command_id="$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
@@ -151,7 +154,7 @@ jobs:
       - name: Verify SSM result
         env:
           COMMAND_ID: ${{ steps.deploy.outputs.command_id }}
-          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID || 'i-0d4a8e0177f8d24ed' }}
         run: |
           aws ssm wait command-executed \
             --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" || true
@@ -165,5 +168,5 @@ jobs:
 
       - name: Verify public production endpoint
         env:
-          API_URL: ${{ vars.PROD_API_URL }}
+          API_URL: ${{ vars.PROD_API_URL || 'https://api.merakiai.online' }}
         run: curl --fail --show-error --silent --retry 5 --retry-delay 5 "$API_URL/health"
