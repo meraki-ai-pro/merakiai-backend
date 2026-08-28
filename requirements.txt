@@ -1,46 +1,46 @@
 # ── Web framework ────────────────────────────────────────────────────────────
-fastapi==0.135.3
-uvicorn[standard]==0.44.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
 python-multipart==0.0.32
 
 # ── Database / Auth ───────────────────────────────────────────────────────────
-supabase==2.28.3
-postgrest==2.28.3
-python-dotenv==1.2.2
+supabase==2.31.0
+postgrest==2.31.0
+python-dotenv==1.2.3
 
 # ── Auth / Security ───────────────────────────────────────────────────────────
 PyJWT[crypto]==2.13.0
-fastapi-security==0.1.0
-pydantic[email]==2.13.1
+fastapi-security==0.5.0
+pydantic[email]==2.13.4
 
 # ── Document parsing ──────────────────────────────────────────────────────────
 pypdf==6.16.2
 # Renders PDF pages to images for the formula-OCR step (app/ai/ingestion/math_ocr.py)
-pypdfium2==5.11.0
+pypdfium2==5.13.0
 python-docx==1.2.0
 # Lecture decks. Slides carry the headings and the speaker notes carry the
 # teaching, so both are ingested (app/ai/ingestion/math_parser.py).
 python-pptx==1.0.2
 unstructured==0.22.21
-beautifulsoup4==4.14.3
+beautifulsoup4==4.15.0
 lxml==6.1.2
-pandas==3.0.2
+pandas==3.0.5
 tabulate==0.10.0
 # Roster import (app/core/roster.py). Lecturers hand out class lists as .xlsx
 # far more often than as .csv, and openpyxl is the only reader for that format.
 openpyxl==3.1.5
 
 # ── AI / ML providers ─────────────────────────────────────────────────────────
-openai==2.31.0
-anthropic==0.95.0
-pinecone==8.1.2
-elevenlabs==2.43.0
+openai==3.3.1
+anthropic==1.0.0
+pinecone==9.1.0
+elevenlabs==2.65.0
 
 # ── Cloud / Infrastructure ────────────────────────────────────────────────────
-boto3==1.42.89
+boto3==1.43.80
 # Imported directly by app/core/secrets.py, not just pulled in by boto3
-botocore==1.42.97
-requests==2.33.1
+botocore==1.43.80
+requests==2.34.2
 # Used directly for the Cohere re-rank call (app/ai/rag/retriever.py). It also
 # arrives via openai/anthropic, but a transitive pin is not a contract.
 httpx==0.28.1
@@ -48,8 +48,8 @@ httpx==0.28.1
 # ── Task queue ────────────────────────────────────────────────────────────────
 celery==5.6.3
 kombu==5.6.2
-redis==7.4.0
-websockets==15.0.1
+redis==8.1.0
+websockets==17.0.1
 rabbitmq==0.2.0
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
