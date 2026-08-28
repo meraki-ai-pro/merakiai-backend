@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 from anthropic import Anthropic, AsyncAnthropic
 from anthropic._exceptions import OverloadedError, APIError, RateLimitError, APITimeoutError
 
+from app.ai.anthropic_config import client_options
 from app.core.llm_config import get_mode_config  # noqa: F401 — re-exported for callers
 
 # Lazy singletons. These were built at *import* time, which turned a missing
@@ -19,24 +20,17 @@ _client: Anthropic | None = None
 _async_client: AsyncAnthropic | None = None
 
 
-def _get_api_key() -> str:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing ANTHROPIC_API_KEY environment variable.")
-    return api_key
-
-
 def get_client() -> Anthropic:
     global _client
     if _client is None:
-        _client = Anthropic(api_key=_get_api_key())
+        _client = Anthropic(**client_options())
     return _client
 
 
 def get_async_client() -> AsyncAnthropic:
     global _async_client
     if _async_client is None:
-        _async_client = AsyncAnthropic(api_key=_get_api_key())
+        _async_client = AsyncAnthropic(**client_options())
     return _async_client
 
 
