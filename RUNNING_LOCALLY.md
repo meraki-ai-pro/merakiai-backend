@@ -85,21 +85,130 @@ which reads like a broken queue rather than a missing environment variable.
 ```bash
 CELERY_INCLUDE=app.media.render.tasks .venv/Scripts/python -m celery \
   -A app.core.celery_app.celery_app worker \
-  --queues=render_tasks --concurrency=1 --pool=solo --loglevel=info
+  --queues=render_manim --concurrency=1 --pool=solo --loglevel=info
 ```
 
 This worker also needs **manim** and a **LaTeX distribution** (the generated
 scenes use `MathTex`). Neither is in requirements.txt on purpose — only the
-render container needs them. If manim lives in its own virtualenv, point
+render container needs them. Put manim in its own virtualenv and point
 `MANIM_PYTHON` at that interpreter instead of installing a renderer's worth of
 dependencies into the backend venv:
 
 ```bash
-MANIM_PYTHON=/path/to/manim-venv/Scripts/python.exe
+python -m venv .venv-manim && .venv-manim/Scripts/python -m pip install manim==0.18.1
 ```
+
+```bash
+MANIM_PYTHON="$PWD/.venv-manim/Scripts/python.exe"
+```
+
+Verified on Windows with MiKTeX supplying `latex` and `dvisvgm`. `MANIM_QUALITY=-ql`
+renders in well under a minute, which is what you want while iterating; the
+default `-qm` is the pilot setting. The pin matches `requirements-render.txt` —
+0.21 also works but is not what ships.
 
 Without LaTeX the render reaches manim and then dies with
 `FileNotFoundError: [WinError 2]` when manim tries to spawn `latex`.
+
+### Narration is a SECOND job, on the worker from step 5
+
+A finished render is silent. The spoken track is added afterwards by
+`app.ai.tasks.process_narration_task` on **video_tasks** — the ordinary worker
+from step 5 — not by the render worker.
+
+That split is deliberate and is not worth "simplifying". The render worker
+executes model-generated Python, so `render.Dockerfile` installs no ElevenLabs
+client and `docker-compose.render.yml` passes it no key: a payload that escapes
+the AST allowlist finds no credential to steal and no HTTP client to steal it
+with. Adding TTS there would undo that in one line.
+
+Consequences while running locally:
+
+* the worker from step 5 must be running, or every video stays silent with
+  `narration_status = 'pending'`;
+* that worker needs **ffmpeg and ffprobe on PATH** (the main Dockerfile
+  installs them; a bare Windows checkout does not). Without them the video is
+  still fine and reviewable — narration just records `failed`;
+* `ELEVENLABS_API_KEY` must be set, and a voice must be resolvable: either
+  `RENDER_NARRATION_VOICE_ID`, or an active row in `avatar_voice_bundles`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RENDER_NARRATION` | `1` | Set to `0` to render silent videos. Assets are marked `skipped`, not `failed`. |
+| `RENDER_NARRATION_VOICE_ID` | _(empty)_ | Global override that forces ONE voice for every course. Normally left empty so the voice comes from the course — see below. |
+| `DEFAULT_NARRATION_VOICE_ID` | first active bundle | The house narrator, used by any course whose lecturer has not recorded a voice. Point this at a clear, well-paced ElevenLabs voice. |
+| `RENDER_FFMPEG_TIMEOUT` | `180` | Seconds before the mux is abandoned. |
+| `MANIM_SPEED` | `0.85` | Playback stretch on finished Manim renders — 0.85 plays them back 15% slower. `1.0` disables it. |
+
+### Whose voice speaks
+
+One resolver, `app/media/voices.voice_for_course`, answers this for BOTH the
+concept videos and the Learn-mode lesson board, so the two cannot drift into
+different voices for the same course:
+
+1. the voice the lecturer recorded and attached to that course
+   (`/lecturer/voice`, then the course's Settings tab);
+2. `DEFAULT_NARRATION_VOICE_ID`;
+3. the first active `avatar_voice_bundles` row, so a deployment that has
+   configured nothing still speaks.
+
+The **lesson board** now calls `POST /narration/board`, which synthesises a
+slide in the course's voice and caches it in the audio bucket keyed by voice +
+text — a cohort of two hundred pays for each slide once. The browser's own
+speech synthesis remains as a fallback, so an outage makes the lesson sound
+worse rather than silent.
+
+Requires `sql/014_lecturer_voices.sql`. Without it, voice recording reports
+itself unavailable and every course falls back to the default narrator.
+
+An asset is briefly `status='ready'` with `has_audio=false`. That is a real
+state, it is stored, and the lecturer's review queue shows "Adding narration…"
+rather than pretending the video is finished.
+
+### Renders for Biology, Chemistry and other non-mathematical courses
+
+Those route to **Remotion**, not Manim, and Remotion is a different worker
+image (`remotion.Dockerfile`, `RENDERER=remotion`). With only the Manim worker
+running, a Chemistry render sits queued for ever — which looks like a hang and
+is not one.
+
+**Each renderer has its own queue** — `render_manim` and `render_remotion`.
+They deliberately do not share one: each image registers only the renderer it
+carries, so a shared queue lets whichever worker is free take a job it cannot
+serve, and it fails with `No renderer registered under 'manim'`. Dispatch picks
+the queue from the asset's renderer (`routing.render_queue()`), so a department
+teaching both maths and biology just runs both workers.
+
+To run Remotion locally rather than in its container:
+
+```bash
+cd remotion && npm install          # once
+```
+
+```bash
+RENDERER=remotion REMOTION_PROJECT="$PWD/remotion" \
+CELERY_INCLUDE=app.media.render.tasks .venv/Scripts/python -m celery \
+  -A app.core.celery_app.celery_app worker \
+  --queues=render_remotion --concurrency=1 --pool=solo --loglevel=info
+```
+
+`REMOTION_PROJECT` is required outside the container — it defaults to
+`/app/remotion`, which does not exist on a dev machine, and the renderer then
+reports the project as missing.
+
+Check where a course will route before queueing anything:
+
+```bash
+.venv/Scripts/python scripts/check_concept_videos.py
+```
+
+Offline, no keys, no cost. Add `--live --course <id> --token <lecturer-jwt>` to
+queue real renders across four subjects and poll them to completion.
+
+Routing reads `courses.subject` (Settings tab in the lecturer workspace). Leave
+it blank and the course **name** is used as the hint; if neither matches, the
+default renderer is Manim — which is right for a maths course and wrong for a
+Pharmacology one.
 
 ## 7. Point the frontend at it
 
@@ -198,10 +307,22 @@ drive the lecturer and assessment APIs directly.
 .venv/Scripts/python -m pytest tests/unit -q
 ```
 
-667 tests, no network or database needed, about 10 seconds.
+774 tests, no network or database needed, about 40 seconds.
+
+Two in `test_retriever.py::TestChunkPresentation` fail on a checkout as of
+2026-08-19 and are unrelated to anything above: `RetrievedChunk.location`
+deliberately omits the storage filename ("Student-safe source label without
+internal storage filenames") and those two tests still assert the older shape
+that included it.
 
 ## Database
 
 Schema changes live in `sql/`, numbered in dependency order. If the backend
 starts logging "Apply 0XX_….sql", that migration has not been run against your
 Supabase project. See `sql/README.md`.
+
+`sql/013_roster_import_narration_and_upload_tags.sql` is the most recent. Every
+feature that needs it degrades rather than breaking — roster import reports the
+un-registered half as failures, narration bookkeeping is skipped, upload tags
+are dropped, and retrieval falls back to the pre-tagging column set — so the
+symptom is quiet missing behaviour, not a 500. Apply it.

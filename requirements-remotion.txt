@@ -1,0 +1,18 @@
+# Remotion render worker dependencies only.
+#
+# This worker renders a validated JSON specification with the fixed React
+# project in remotion/. It does not execute Manim scenes, so carrying Manim and
+# its Python graphics stack here only increases build time and attack surface.
+
+# Task queue
+celery==5.6.3
+kombu==5.6.2
+redis==7.4.0
+
+# Supabase (media_assets rows + rendered-media storage)
+supabase==2.28.3
+postgrest==2.28.3
+python-dotenv==1.2.2
+
+# Scene specification generation
+anthropic==0.95.0

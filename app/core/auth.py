@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt as _jwt
+import jwt as _jwt
+from jwt import InvalidTokenError
 
 from app.db.supabase import get_supabase, get_user_client
 
@@ -17,7 +18,11 @@ security = HTTPBearer()
 _ALGORITHM = "HS256"
 
 
-def _validate_token(credentials: HTTPAuthorizationCredentials):
+def _validate_token(
+    credentials: HTTPAuthorizationCredentials,
+    *,
+    allow_password_change: bool = False,
+):
     """Validate a Supabase JWT locally — no network round-trip required.
 
     Requires SUPABASE_JWT_SECRET (found in Supabase Dashboard → Settings → API
@@ -39,7 +44,7 @@ def _validate_token(credentials: HTTPAuthorizationCredentials):
             algorithms=[_ALGORITHM],
             options={"verify_aud": False},  # Supabase sets aud="authenticated"
         )
-    except JWTError:
+    except InvalidTokenError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
@@ -50,6 +55,8 @@ def _validate_token(credentials: HTTPAuthorizationCredentials):
     # Authenticator Assurance Level: "aal2" once the user has passed MFA this
     # session, "aal1" otherwise. Surfaced so endpoints can require step-up.
     aal: str = payload.get("aal", "aal1")
+    user_metadata = payload.get("user_metadata") or {}
+    must_change_password = bool(user_metadata.get("must_change_password"))
 
     if not user_id:
         raise HTTPException(
@@ -57,7 +64,18 @@ def _validate_token(credentials: HTTPAuthorizationCredentials):
             detail="Invalid or expired token",
         )
 
-    return SimpleNamespace(id=user_id, email=user_email, aal=aal)
+    if must_change_password and not allow_password_change:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You must change your temporary password before continuing.",
+        )
+
+    return SimpleNamespace(
+        id=user_id,
+        email=user_email,
+        aal=aal,
+        must_change_password=must_change_password,
+    )
 
 
 # Roles carrying platform-wide authority. A lecturer is deliberately absent:
@@ -160,12 +178,30 @@ async def auth_guard(credentials: HTTPAuthorizationCredentials = Depends(securit
     }
 
 
+async def password_change_guard(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    """Authenticate while allowing an account marked for a mandatory reset.
+
+    This dependency is intentionally limited to the profile read and password
+    change flow. All normal guards reject the same token until the flag clears.
+    """
+    user = _validate_token(credentials, allow_password_change=True)
+    return {
+        "id": user.id,
+        "email": user.email,
+        "token": credentials.credentials,
+        "aal": user.aal,
+        "must_change_password": user.must_change_password,
+    }
+
+
 def _user_has_verified_mfa(user_id: str) -> bool:
     """Return True if the user has a verified TOTP factor.
 
     Uses the Supabase admin API (service role). On lookup failure we fail
-    OPEN (return False) so a transient Supabase error never locks a user out
-    of an already password-authenticated action — MFA here is defence-in-depth.
+    closed with a temporary-service error: silently treating an unknown MFA
+    state as "not enrolled" would let a sensitive action bypass step-up auth.
     """
     try:
         resp = get_supabase().auth.admin.get_user_by_id(user_id)
@@ -175,9 +211,12 @@ def _user_has_verified_mfa(user_id: str) -> bool:
             and getattr(f, "status", None) == "verified"
             for f in factors
         )
-    except Exception as exc:  # noqa: BLE001 — best-effort defence-in-depth check
-        logger.warning("MFA factor lookup failed for user %s: %s", user_id, exc)
-        return False
+    except Exception as exc:  # noqa: BLE001 — external identity-provider boundary
+        logger.exception("MFA factor lookup failed for user %s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to verify multi-factor authentication status. Please try again.",
+        ) from exc
 
 
 async def require_mfa_if_enrolled(user=Depends(auth_guard)):
@@ -189,6 +228,22 @@ async def require_mfa_if_enrolled(user=Depends(auth_guard)):
     makes MFA meaningful server-side rather than a login-UI gate that a raw
     aal1 token could bypass.
     """
+    if user.get("aal") == "aal2":
+        return user
+    has_mfa = await asyncio.to_thread(_user_has_verified_mfa, user["id"])
+    if has_mfa:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This action requires two-factor verification. "
+                "Please re-authenticate with your authenticator app."
+            ),
+        )
+    return user
+
+
+async def require_mfa_for_password_change(user=Depends(password_change_guard)):
+    """MFA check for the one flow mandatory-reset accounts may access."""
     if user.get("aal") == "aal2":
         return user
     has_mfa = await asyncio.to_thread(_user_has_verified_mfa, user["id"])

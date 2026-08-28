@@ -372,6 +372,7 @@ async def _do_mode_session_start(
         format_review_prompt,
         generate_application_scenario,
         format_application_prompt,
+        asked_summary,
     )
 
     supabase = get_supabase()
@@ -408,7 +409,11 @@ async def _do_mode_session_start(
                 "session_id": session_id,
                 "mode_session_id": mode_session_id,
                 "pending_mode": "review",
-                "pending_payload": item,
+                # _asked rides along inside pending_payload so the question
+                # history survives to the next turn without a schema change.
+                # Everything that consumes this payload reads named keys, so
+                # the extra one is inert.
+                "pending_payload": {**item, "_asked": [asked_summary(item)]},
                 "step": 1,
                 "total_steps": 1,
                 "difficulty": difficulty,
@@ -583,6 +588,38 @@ def process_ingestion_task(
 
 
 # ---------------------------------------------------------------------------
+# Concept-video narration
+# ---------------------------------------------------------------------------
+# Narration lives HERE rather than with the render task because it needs
+# ElevenLabs and ffmpeg, and the render container has neither on purpose — it
+# executes model-generated code, so it ships no TTS client and is given no key
+# for one. The render worker dispatches this by name onto video_tasks and this
+# worker, which already has both, finishes the job.
+
+@shared_task
+def process_narration_task(asset_id: str):
+    """Add a spoken track to a rendered concept video.
+
+    Never raises. A narration failure must leave the silent video usable and
+    reviewable, not fail the render that produced it.
+    """
+    from app.media.narration import narrate_asset
+
+    reset_async_supabase()
+    try:
+        return asyncio.run(narrate_asset(asset_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("process_narration_task failed  asset=%s: %s", asset_id, exc)
+        try:
+            get_supabase().table("media_assets").update(
+                {"narration_status": "failed"}
+            ).eq("id", asset_id).execute()
+        except Exception:  # noqa: BLE001 — nothing left to do but log
+            logger.exception("Could not record narration failure for %s", asset_id)
+        return {"asset_id": asset_id, "status": "failed", "error": str(exc)[:300]}
+
+
+# ---------------------------------------------------------------------------
 # Mode session TURN Celery task
 # ---------------------------------------------------------------------------
 
@@ -609,6 +646,7 @@ async def _do_mode_session_turn(
         adjust_difficulty,
         evaluate_application_answer,
         format_application_prompt,
+        asked_summary,
     )
 
     supabase = get_supabase()
@@ -834,13 +872,19 @@ async def _do_mode_session_turn(
         }
 
     _publish_status(session_id, "preparing", "Preparing the next question")
+    # What this session has already asked. Without it the generator re-derives
+    # a question from the same course, the same band and the same chunks, and
+    # hands back the question it just asked with the options shuffled.
+    asked_so_far = list(pending_payload.get("_asked") or [])
     item2, ctx2 = await generate_review_item(
         session_type=session_type,
         difficulty=next_difficulty,
         course_id=course_id,
         course_name=course_name,
         difficulty_descriptors=difficulty_descriptors,
+        asked=asked_so_far,
     )
+    asked_so_far.append(asked_summary(item2))
     next_prompt = format_review_prompt(item2)
     await _stream_mode_text(
         session_id,
@@ -856,7 +900,7 @@ async def _do_mode_session_turn(
             "session_id": session_id,
             "mode_session_id": mode_session_id,
             "pending_mode": "review",
-            "pending_payload": item2,
+            "pending_payload": {**item2, "_asked": asked_so_far},
             "step": 1,
             "total_steps": 1,
             "difficulty": next_difficulty,

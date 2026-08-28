@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Installed on EC2 as /usr/local/sbin/meraki-deploy and invoked through SSM:
+#   sudo /usr/local/sbin/meraki-deploy <40-char-commit-sha> production
+
+umask 027
+
+commit_sha="${1:-}"
+environment="${2:-}"
+
+if [[ ! "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "A full 40-character lowercase Git commit SHA is required" >&2
+  exit 64
+fi
+
+case "$environment" in
+  production|uat) ;;
+  *)
+    echo "Environment must be production or uat" >&2
+    exit 64
+    ;;
+esac
+
+config_file="/etc/meraki/deploy-${environment}.conf"
+if [[ ! -r "$config_file" ]]; then
+  echo "Deployment configuration is missing: $config_file" >&2
+  exit 78
+fi
+
+# shellcheck disable=SC1090
+source "$config_file"
+
+required=(APP_DIR VENV_DIR GIT_REMOTE GIT_BRANCH HEALTH_URL APP_USER)
+for name in "${required[@]}"; do
+  if [[ -z "${!name:-}" ]]; then
+    echo "$name is required in $config_file" >&2
+    exit 78
+  fi
+done
+
+if [[ ! -d "$APP_DIR/.git" || ! -x "$VENV_DIR/bin/python" ]]; then
+  echo "APP_DIR or VENV_DIR is not bootstrapped" >&2
+  exit 78
+fi
+
+read -r -a services <<< "${SERVICES:-meraki-api meraki-celery-text meraki-celery-video meraki-celery-ingestion}"
+render_compose_file="${RENDER_COMPOSE_FILE:-}"
+render_env_file="${RENDER_ENV_FILE:-/etc/meraki/render.env}"
+render_project_name="${RENDER_PROJECT_NAME:-merakiai-render}"
+
+render_compose() {
+  local tag="$1"
+  shift
+  MERAKI_RENDER_TAG="$tag" MERAKI_RENDER_ENV_FILE="$render_env_file" \
+    docker compose --project-name "$render_project_name" \
+      --file "$render_compose_file" "$@"
+}
+
+if [[ -n "$render_compose_file" ]]; then
+  if [[ ! -f "$render_compose_file" || ! -r "$render_env_file" ]]; then
+    echo "Render compose file or environment file is missing" >&2
+    exit 78
+  fi
+  docker compose version >/dev/null
+fi
+lock_file="/run/lock/meraki-deploy-${environment}.lock"
+log_dir="/var/log/meraki"
+if [[ "$environment" == "uat" ]]; then
+  log_dir="/var/log/meraki-uat"
+fi
+mkdir -p "$log_dir"
+log_file="$log_dir/deploy.log"
+
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  echo "Another ${environment} deployment is already running" >&2
+  exit 75
+fi
+
+exec > >(tee -a "$log_file") 2>&1
+echo "=== $(date -u +%FT%TZ) deploy ${environment} ${commit_sha} ==="
+
+previous_sha="$(sudo -u "$APP_USER" git -C "$APP_DIR" rev-parse HEAD)"
+switched=0
+
+rollback() {
+  local exit_code=$?
+  trap - ERR
+  if [[ "$switched" -eq 1 ]]; then
+    echo "Deployment failed; rolling back to ${previous_sha}"
+    sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$previous_sha"
+    sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
+      --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
+    systemctl restart "${services[@]}"
+    if [[ -n "$render_compose_file" ]]; then
+      render_compose "$previous_sha" up -d --remove-orphans || true
+    fi
+    curl --fail --silent --show-error --retry 12 --retry-delay 5 \
+      --retry-all-errors "$HEALTH_URL" >/dev/null || true
+  fi
+  exit "$exit_code"
+}
+trap rollback ERR
+
+if [[ -n "$(sudo -u "$APP_USER" git -C "$APP_DIR" status --porcelain)" ]]; then
+  echo "Refusing to deploy over a dirty server worktree" >&2
+  exit 65
+fi
+
+sudo -u "$APP_USER" git -C "$APP_DIR" fetch --prune "$GIT_REMOTE" "$GIT_BRANCH"
+sudo -u "$APP_USER" git -C "$APP_DIR" cat-file -e "${commit_sha}^{commit}"
+if ! sudo -u "$APP_USER" git -C "$APP_DIR" merge-base --is-ancestor \
+  "$commit_sha" "$GIT_REMOTE/$GIT_BRANCH"; then
+  echo "Commit is not reachable from ${GIT_REMOTE}/${GIT_BRANCH}" >&2
+  exit 65
+fi
+
+sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$commit_sha"
+switched=1
+sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
+  --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
+
+if [[ -n "$render_compose_file" ]]; then
+  render_compose "$commit_sha" build
+fi
+
+systemctl restart "${services[@]}"
+if [[ -n "$render_compose_file" ]]; then
+  render_compose "$commit_sha" up -d --remove-orphans
+fi
+curl --fail --silent --show-error --retry 12 --retry-delay 5 \
+  --retry-all-errors "$HEALTH_URL" >/dev/null
+
+switched=0
+trap - ERR
+echo "=== $(date -u +%FT%TZ) deploy complete ${environment} ${commit_sha} ==="

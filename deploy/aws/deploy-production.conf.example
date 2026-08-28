@@ -1,0 +1,10 @@
+APP_DIR=/srv/meraki/merakiai-backend
+VENV_DIR=/srv/meraki/.venv
+GIT_REMOTE=origin
+GIT_BRANCH=main
+HEALTH_URL=http://127.0.0.1:8000/health
+APP_USER=meraki
+SERVICES="meraki-api meraki-celery-text meraki-celery-video meraki-celery-ingestion"
+RENDER_COMPOSE_FILE=/srv/meraki/merakiai-backend/deploy/aws/docker-compose.render.production.yml
+RENDER_ENV_FILE=/etc/meraki/render.env
+RENDER_PROJECT_NAME=merakiai-render

@@ -9,14 +9,14 @@ AWS Secrets Manager loader.
 
 2. Set TWO environment variables on the production server/container (these are
    the only values that should ever live outside AWS):
-       AWS_SECRET_NAME=meraki-backend/prod
+       AWS_SECRET_ARN=arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/meraki/config-xxxxxx
        AWS_REGION=us-east-1
 
 3. Grant the EC2 / ECS task IAM role the secretsmanager:GetSecretValue
    permission for that secret ARN. No AWS_ACCESS_KEY_ID needed on the host.
 
 ─── Local development ────────────────────────────────────────────────────────
-Leave AWS_SECRET_NAME unset. The loader becomes a no-op and the .env file is
+Leave AWS_SECRET_ARN and AWS_SECRET_NAME unset. The loader becomes a no-op and the .env file is
 used as normal.
 
 ─── How it works ─────────────────────────────────────────────────────────────
@@ -39,8 +39,10 @@ def load_aws_secrets() -> None:
     Safe to call multiple times — values already present in os.environ are
     never overridden, so explicit container-level env vars always win.
     """
-    secret_name = os.getenv("AWS_SECRET_NAME")
-    if not secret_name:
+    # The EC2 deployment guide uses AWS_SECRET_ARN. AWS_SECRET_NAME remains a
+    # supported alias for older installations; both are valid SecretId values.
+    secret_id = os.getenv("AWS_SECRET_ARN") or os.getenv("AWS_SECRET_NAME")
+    if not secret_id:
         # Local development — .env file is used instead.
         return
 
@@ -51,7 +53,7 @@ def load_aws_secrets() -> None:
         from botocore.exceptions import ClientError  # noqa: F401
 
         client = boto3.client("secretsmanager", region_name=region)
-        response = client.get_secret_value(SecretId=secret_name)
+        response = client.get_secret_value(SecretId=secret_id)
         secret_str = response.get("SecretString") or ""
 
         if not secret_str:
@@ -68,7 +70,7 @@ def load_aws_secrets() -> None:
         logger.info(
             "AWS Secrets Manager: loaded %d secret(s) from '%s' (region=%s)",
             injected,
-            secret_name,
+            secret_id,
             region,
         )
 
@@ -76,5 +78,5 @@ def load_aws_secrets() -> None:
         # Fail loudly at startup — a misconfigured secret is never safe to ignore.
         raise RuntimeError(
             f"Failed to load secrets from AWS Secrets Manager "
-            f"(secret='{secret_name}', region='{region}'): {exc}"
+            f"(secret='{secret_id}', region='{region}'): {exc}"
         ) from exc

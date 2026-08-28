@@ -62,14 +62,35 @@ task_queues = (
             "x-dead-letter-exchange": "dlx",
         },
     ),
+    # ONE QUEUE PER RENDERER, not one shared render queue.
+    #
+    # Each render image registers only the renderer it carries (see
+    # app/media/render/tasks.py), so a shared queue lets the Remotion worker
+    # pick up a Manim job it cannot serve — it fails with "No renderer
+    # registered under 'manim'", which looks like a broken install rather than
+    # a misrouted message. Dispatch picks the queue from the asset's renderer
+    # via routing.render_queue().
+    #
+    # Renders take minutes and must never share a worker with a student turn,
+    # which is why none of these is the default queue.
+    Queue(
+        "render_manim",
+        _render_exchange,
+        routing_key="render.manim",
+        queue_arguments={"x-dead-letter-exchange": "dlx"},
+    ),
+    Queue(
+        "render_remotion",
+        _render_exchange,
+        routing_key="render.remotion",
+        queue_arguments={"x-dead-letter-exchange": "dlx"},
+    ),
+    # Kept declared so messages still in flight from a pre-split deployment are
+    # not lost on upgrade. Nothing dispatches here any more.
     Queue(
         "render_tasks",
         _render_exchange,
         routing_key="render",
-        # Manim/Remotion renders take minutes and must never share a worker
-        # with a student turn. This queue is consumed only by the dedicated
-        # render container, which carries LaTeX, cairo and ffmpeg and runs
-        # model-generated code — see render.Dockerfile.
         queue_arguments={
             "x-dead-letter-exchange": "dlx",
         },
@@ -129,6 +150,13 @@ celery_app.conf.update(
         "app.ai.tasks.process_mode_session_start_task": {"queue": "text_tasks"},
         "app.ai.tasks.process_mode_session_turn_task":  {"queue": "text_tasks"},
         "app.ai.tasks.process_ingestion_task":          {"queue": "ingestion_tasks"},
-        "app.media.render.tasks.process_render_task":   {"queue": "render_tasks"},
+        # No static route: the queue depends on the ASSET's renderer, so every
+        # dispatch passes queue= explicitly (routing.render_queue()). A static
+        # entry here would silently override that for .delay() callers.
+        # Narration is dispatched BY THE RENDER WORKER but must not run there:
+        # that container has no ElevenLabs client and no key for one, because it
+        # executes model-generated code. video_tasks is the ordinary media
+        # worker, which has ffmpeg and the TTS credentials.
+        "app.ai.tasks.process_narration_task":          {"queue": "video_tasks"},
     },
 )

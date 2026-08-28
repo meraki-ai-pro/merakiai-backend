@@ -2,6 +2,7 @@
 .env
 .env.*
 *.env
+!.env.example
 
 # Runtime LLM config overrides (admin-managed, not source)
 llm_config.json
@@ -42,6 +43,9 @@ logs/
 htmlcov/
 .tox/
 docs/
+!docs/
+docs/*
+!docs/LEARN_ANIMATION_VIDEO_PLAN.md
 *.ini
 # IDE
 .vscode/
@@ -69,7 +73,7 @@ triggers.csv
 
 # Untracked
 requirements-test.txt
-requirements.lock.txt
+.venv-manim/
 # Remotion build deps
 remotion/node_modules/
 remotion/out/

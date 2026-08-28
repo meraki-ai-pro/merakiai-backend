@@ -217,10 +217,9 @@ async def embed_query(query: str) -> List[float]:
         return _normalize_embedding(cached)
 
     client = _get_openai()
-    response = await client.embeddings.create(
-        model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
-        input=query,
-    )
+    from app.ai.embedding_config import request_options
+
+    response = await client.embeddings.create(input=query, **request_options())
     embedding = response.data[0].embedding
 
     # Not awaited: the answer does not depend on the cache write landing.
@@ -630,8 +629,16 @@ async def retrieve(
     course_id: str,
     top_k: int = 6,
     candidates: int | None = None,
+    question_format: str | None = None,
+    difficulty: str | None = None,
 ) -> List[RetrievedChunk]:
-    """Hybrid retrieval with fusion, optional re-ranking, and attribution."""
+    """Hybrid retrieval with fusion, optional re-ranking, and attribution.
+
+    ``question_format`` and ``difficulty`` are what the student picked in the
+    mode selector. They prefer documents the lecturer tagged to match and fall
+    back to everything visible when nothing does — see
+    app/ai/rag/visibility.prefer.
+    """
     mode = (mode or "learn").lower().strip()
     course_id = (course_id or "").strip()
     if not course_id:
@@ -646,7 +653,9 @@ async def retrieve(
     # them would add the DB round trip to time-to-first-token for nothing.
     embedding, document_ids = await asyncio.gather(
         embed_query(query),
-        visible_document_ids(course_id, mode),
+        visible_document_ids(
+            course_id, mode, question_format=question_format, difficulty=difficulty
+        ),
     )
 
     if document_ids is not None and not document_ids:
@@ -726,11 +735,27 @@ async def retrieve(
     return selected
 
 
-async def retrieve_context(query: str, mode: str, course_id: str, top_k: int = 5) -> List[str]:
+async def retrieve_context(
+    query: str,
+    mode: str,
+    course_id: str,
+    top_k: int = 5,
+    question_format: str | None = None,
+    difficulty: str | None = None,
+) -> List[str]:
     """Backwards-compatible retrieval returning plain context strings.
 
-    Used by the mode-session flows (practice scenario and review question
-    generation), which build their own prompts and do not cite sources.
+    Used by the mode-session flows (scenario and review question generation),
+    which build their own prompts and do not cite sources. They are also the
+    only callers that know a question format and a difficulty, which is why
+    those are threaded this far down.
     """
-    chunks = await retrieve(query=query, mode=mode, course_id=course_id, top_k=top_k)
+    chunks = await retrieve(
+        query=query,
+        mode=mode,
+        course_id=course_id,
+        top_k=top_k,
+        question_format=question_format,
+        difficulty=difficulty,
+    )
     return [chunk.context_text for chunk in chunks]

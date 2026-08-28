@@ -7,7 +7,7 @@ router = APIRouter(prefix="/ingestion", tags=["Ingestion"])
 
 # M-4: 50 MB hard cap on document uploads
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-_ALLOWED_EXTENSIONS = {"pdf", "docx", "doc"}
+_ALLOWED_EXTENSIONS = {"pdf", "docx", "doc", "pptx"}
 
 
 @router.post("/documents")

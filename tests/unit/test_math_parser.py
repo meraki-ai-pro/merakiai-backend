@@ -152,8 +152,17 @@ def test_markdown_source_keeps_existing_latex():
 
 
 def test_unsupported_extension_raises():
+    # .ppt, not .pptx: the modern deck format is supported now, but the legacy
+    # binary container is a different format that python-pptx cannot read.
     with pytest.raises(ValueError, match="Unsupported file type"):
-        parse_blocks(b"data", "notes.pptx")
+        parse_blocks(b"data", "notes.ppt")
+
+
+def test_bytes_that_are_not_the_claimed_format_raise_a_readable_error():
+    """A truncated upload used to surface as zipfile.BadZipFile — "File is not
+    a zip file" — which reaches the lecturer as a bare "failed"."""
+    with pytest.raises(ValueError, match="could not be read as a PPTX file"):
+        parse_blocks(b"not really a deck", "lecture.pptx")
 
 
 class TestPdfBoilerplate:

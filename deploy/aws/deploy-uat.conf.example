@@ -1,0 +1,7 @@
+APP_DIR=/srv/meraki-uat/merakiai-backend
+VENV_DIR=/srv/meraki-uat/.venv
+GIT_REMOTE=origin
+GIT_BRANCH=dev
+HEALTH_URL=http://127.0.0.1:8001/health
+APP_USER=meraki
+SERVICES="meraki-api-uat meraki-celery-text-uat meraki-celery-video-uat meraki-celery-ingestion-uat"

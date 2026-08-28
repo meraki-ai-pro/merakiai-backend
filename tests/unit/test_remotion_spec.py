@@ -10,8 +10,12 @@ plausible-looking but wrong video.
 import pytest
 from pydantic import ValidationError
 
+from pathlib import Path
+
 from app.media.render.remotion_spec import (
+    CHART_SECONDS,
     MAX_STEPS,
+    STEP_SECONDS,
     RemotionSpec,
     validate_spec,
 )
@@ -144,19 +148,40 @@ class TestUnknownFieldsCannotReachTheRenderer:
         }
 
 
+# The title card and the closing pause. Named rather than inlined so a pacing
+# change is one edit here, not a hunt through assertions.
+TITLE = 3.0
+OUTRO = 2.5
+
+
 class TestDuration:
+    def test_the_two_sides_agree_on_the_step_beat(self):
+        """Python computes the frame range the CLI is given; the React
+        composition computes its own durationInFrames. A disagreement is a hard
+        render failure, not a slightly-wrong video."""
+        types_ts = (
+            Path(__file__).resolve().parents[2] / "remotion" / "src" / "types.ts"
+        ).read_text(encoding="utf-8")
+        assert f"export const STEP_SECONDS = {STEP_SECONDS};" in types_ts
+        assert f"export const CHART_SECONDS = {int(CHART_SECONDS)};" in types_ts
+
+    def test_a_step_gets_long_enough_to_read(self):
+        """Three seconds was enough to glance at a label and not enough to read
+        the explanation under it — the "too fast" complaint."""
+        assert STEP_SECONDS >= 4.5
+
     def test_a_minimal_video_still_has_a_title_and_an_outro(self):
         spec = validate_spec({
             "archetype": "process_flow", "title": "T", "steps": [{"label": "a"}],
         })
-        assert spec.duration_seconds == pytest.approx(2.5 + 3.0 + 1.5)
+        assert spec.duration_seconds == pytest.approx(TITLE + STEP_SECONDS + OUTRO)
 
     def test_slides_contribute_their_own_time(self):
         spec = validate_spec({
             "archetype": "composited_explainer", "title": "T",
             "slides": [{"title": "a", "seconds": 5}, {"title": "b", "seconds": 3}],
         })
-        assert spec.duration_seconds == pytest.approx(2.5 + 8 + 1.5)
+        assert spec.duration_seconds == pytest.approx(TITLE + 8 + OUTRO)
 
     def test_a_full_video_stays_under_three_minutes(self):
         """Proposal §6.2 caps concept videos at three minutes; the bounds have

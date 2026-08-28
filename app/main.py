@@ -23,6 +23,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.sessions.router import router as sessions_router
 from app.api.v1.users.router import router as users_router
 from app.api.v1.feedback import router as feedback_router
+from app.api.v1.narration import router as narration_router
 from app.api.v1.enrolments import router as enrolments_router
 from app.api.v1.events import router as events_router
 from app.api.v1.assessments import router as assessments_router
@@ -59,6 +60,7 @@ _raw_origins = os.getenv(
     "http://localhost:5173,http://localhost:3000,http://localhost:3001",
 )
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_environment = os.getenv("APP_ENV", "development").strip().lower()
 
 # Vercel preview deployments get a unique subdomain per branch/PR
 # (e.g. yourapp-git-feature-abc-username.vercel.app).
@@ -77,6 +79,13 @@ _vercel_origin_regex = (
 # per-machine host allowlists.
 _raw_hosts = os.getenv("ALLOWED_HOSTS", "*")
 _allowed_hosts = [h.strip() for h in _raw_hosts.split(",") if h.strip()] or ["*"]
+
+if _environment == "production":
+    if "*" in _allowed_hosts:
+        raise RuntimeError("ALLOWED_HOSTS must be explicit when APP_ENV=production")
+    if not os.getenv("ALLOWED_ORIGINS", "").strip():
+        raise RuntimeError("ALLOWED_ORIGINS is required when APP_ENV=production")
+
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
 
 app.add_middleware(
@@ -85,9 +94,24 @@ app.add_middleware(
     allow_origin_regex=_vercel_origin_regex,
     allow_credentials=True,
     # M-8: explicit allowlists — never expose all methods/headers to all origins
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    if forwarded_proto == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"
+        )
+    return response
 
 
 @app.exception_handler(Exception)
@@ -117,6 +141,7 @@ app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(users_router)
 app.include_router(feedback_router)
+app.include_router(narration_router)
 app.include_router(enrolments_router)
 app.include_router(events_router)
 app.include_router(assessments_router)

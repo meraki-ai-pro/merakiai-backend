@@ -2,6 +2,8 @@ import os
 
 from openai import AsyncOpenAI
 
+from app.ai.embedding_config import request_options
+
 # Lazy singleton. This module used to read the key and construct the client at
 # *import* time, raising when it was absent — which made every module that
 # transitively imports ingestion unimportable without a full environment, and
@@ -23,7 +25,5 @@ def _get_client() -> AsyncOpenAI:
 async def embed_chunks(texts):
     if not texts:
         return []
-    response = await _get_client().embeddings.create(
-        model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"), input=texts
-    )
+    response = await _get_client().embeddings.create(input=texts, **request_options())
     return [d.embedding for d in response.data]
