@@ -30,3 +30,18 @@ def test_api_and_nginx_keep_uvicorn_private():
     assert "proxy_pass http://127.0.0.1:8000" in nginx
     assert "listen 443 ssl" in nginx
     assert "ssl_protocols TLSv1.2 TLSv1.3" in nginx
+
+
+def test_deploy_validates_against_the_branch_it_just_fetched():
+    deploy = (ROOT / "deploy" / "aws" / "meraki-deploy").read_text()
+
+    assert 'fetch --prune "$GIT_REMOTE" "$GIT_BRANCH"' in deploy
+    assert '"$commit_sha" FETCH_HEAD' in deploy
+    assert '"$GIT_REMOTE/$GIT_BRANCH"' not in deploy
+
+
+def test_production_workflow_bootstraps_the_versioned_deploy_helper():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "raw.githubusercontent.com/meraki-ai-pro/merakiai-backend/${{ github.sha }}" in workflow
+    assert "sudo install --owner root --group root --mode 0755" in workflow

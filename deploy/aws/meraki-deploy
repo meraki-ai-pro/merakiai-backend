@@ -111,8 +111,8 @@ fi
 sudo -u "$APP_USER" git -C "$APP_DIR" fetch --prune "$GIT_REMOTE" "$GIT_BRANCH"
 sudo -u "$APP_USER" git -C "$APP_DIR" cat-file -e "${commit_sha}^{commit}"
 if ! sudo -u "$APP_USER" git -C "$APP_DIR" merge-base --is-ancestor \
-  "$commit_sha" "$GIT_REMOTE/$GIT_BRANCH"; then
-  echo "Commit is not reachable from ${GIT_REMOTE}/${GIT_BRANCH}" >&2
+  "$commit_sha" FETCH_HEAD; then
+  echo "Commit is not reachable from fetched ${GIT_REMOTE}/${GIT_BRANCH}" >&2
   exit 65
 fi
 
