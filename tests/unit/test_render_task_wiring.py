@@ -237,6 +237,8 @@ class TestComposeHardening:
         assert compose.count("cap_drop:") == 2
         assert compose.count("mem_limit:") == 2
         assert compose.count("cpus:") == 2
+        assert compose.count("type: tmpfs") == 2
+        assert compose.count("mode: 0o1777") == 2
 
     def test_production_render_environment_excludes_retrieval_secrets(self):
         compose = _source("deploy/aws/docker-compose.render.production.yml")

@@ -22,8 +22,12 @@ services:
       MANIM_SPEED: "0.85"
       RENDER_NARRATION: "1"
     read_only: true
-    tmpfs:
-      - /tmp/renders:rw,noexec,nosuid,size=1800m,mode=1777
+    volumes:
+      - type: tmpfs
+        target: /tmp/renders
+        tmpfs:
+          size: 1887436800
+          mode: 0o1777
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -56,8 +60,12 @@ services:
       REMOTION_DISABLE_TELEMETRY: "1"
       RENDER_NARRATION: "1"
     read_only: true
-    tmpfs:
-      - /tmp/renders:rw,noexec,nosuid,size=2g,mode=1777
+    volumes:
+      - type: tmpfs
+        target: /tmp/renders
+        tmpfs:
+          size: 2147483648
+          mode: 0o1777
     security_opt:
       - no-new-privileges:true
     cap_drop:
