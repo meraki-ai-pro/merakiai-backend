@@ -146,7 +146,7 @@ jobs:
           command_id="$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --parameters 'commands=["sudo /usr/local/sbin/meraki-deploy ${{ github.sha }} production"]' \
+            --parameters 'commands=["set -e","curl --fail --silent --show-error --location https://raw.githubusercontent.com/meraki-ai-pro/merakiai-backend/${{ github.sha }}/deploy/aws/meraki-deploy --output /tmp/meraki-deploy","sudo install --owner root --group root --mode 0755 /tmp/meraki-deploy /usr/local/sbin/meraki-deploy","sudo /usr/local/sbin/meraki-deploy ${{ github.sha }} production"]' \
             --comment 'Meraki production ${{ github.sha }}' \
             --query 'Command.CommandId' --output text)"
           echo "command_id=$command_id" >> "$GITHUB_OUTPUT"
