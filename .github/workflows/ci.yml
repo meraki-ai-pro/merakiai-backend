@@ -64,7 +64,12 @@ jobs:
   deploy-uat:
     name: Deploy to UAT
     needs: [test-and-audit, container-build]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    # A separate UAT instance is optional. Do not turn a successful dev build
+    # red merely because this project currently operates production only.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/dev' &&
+      vars.UAT_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
