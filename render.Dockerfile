@@ -72,4 +72,4 @@ ENV TMPDIR=/tmp/renders \
 # --concurrency=1: a render is CPU-bound and memory-hungry, so one at a time
 # per container. Scale by adding containers, not threads.
 CMD ["celery", "-A", "app.core.celery_app.celery_app", "worker", \
-     "--queues=render_tasks", "--concurrency=1", "--loglevel=info"]
+     "--queues=render_manim", "--concurrency=1", "--loglevel=info"]

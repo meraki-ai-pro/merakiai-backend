@@ -31,6 +31,10 @@ class CourseCreate(BaseModel):
     domain_topics: list[str] = []
     academic_level: AcademicLevel | None = None
     practice_mode_enabled: bool = True
+    # Free text. Consulted only as a FALLBACK when a video request names no
+    # archetype (app/media/render/routing.py), so "BSc Biology" and "Chemistry
+    # II" both work and neither locks the course into one renderer.
+    subject: str | None = Field(None, max_length=120)
 
 
 class CourseUpdate(BaseModel):
@@ -40,6 +44,7 @@ class CourseUpdate(BaseModel):
     domain_topics: list[str] | None = None
     academic_level: AcademicLevel | None = None
     practice_mode_enabled: bool | None = None
+    subject: str | None = Field(None, max_length=120)
 
 
 def _owned_filter(query, user: dict):

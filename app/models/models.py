@@ -17,7 +17,12 @@ class RagTurnRequest(BaseModel):
 class ModeSessionStartRequest(BaseModel):
     session_id: str = Field(..., max_length=100)
     mode: str = Field(..., max_length=50)
-    session_type: str = Field(..., max_length=50)
+    # Optional since the scenario-topic picker was removed from Assessment
+    # mode: an assessment session has no topic to choose, so the client sends
+    # nothing and the server fills in the neutral placeholder. Review sessions
+    # still send the question format here and it is still required for them —
+    # enforced in the route, where the mode is known.
+    session_type: str | None = Field(None, max_length=50)
     difficulty: str = Field("Basic", max_length=50)
     total_items: int | None = Field(None, ge=1, le=50)
 
@@ -75,7 +80,28 @@ class SessionTitleUpdate(BaseModel):
 
 
 class UpdatePasswordPayload(BaseModel):
+    # Required, not optional. Without it a stolen access token is enough to
+    # take an account over permanently — the thief sets a new password and the
+    # owner is locked out of their own tenancy. Proving the current password
+    # is what makes the token alone insufficient.
+    current_password: str = Field(..., min_length=1, max_length=128)
     new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class UpdateProfilePayload(BaseModel):
+    """Fields a user may change about themselves.
+
+    Deliberately excludes ``email`` and ``role``. Email is an auth identity and
+    changing it needs a verification round trip Supabase owns; role is granted
+    by an admin (see /admin/users/{id}/role) and a self-service field here
+    would be a straight privilege escalation.
+    """
+
+    first_name: str | None = Field(None, min_length=1, max_length=100)
+    last_name: str | None = Field(None, min_length=1, max_length=100)
+    university_name: str | None = Field(None, max_length=200)
+    region: str | None = Field(None, max_length=100)
+    country: str | None = Field(None, max_length=100)
 
 
 class SessionSurveyPayload(BaseModel):
@@ -88,6 +114,10 @@ class SessionSurveyPayload(BaseModel):
 
 class UserFeedbackPayload(BaseModel):
     session_id: str | None = Field(None, max_length=100)
+    # What the student was studying. "The derivative in step 3 is wrong" is not
+    # actionable without it, and most feedback is sent outside a session so
+    # session_id cannot stand in.
+    course_id: str | None = Field(None, max_length=100)
     feedback_type: str = Field(..., max_length=50)  # bug|suggestion|content|ux|other
     # L-4: cap feedback message to prevent abuse / huge DB writes
     message: str = Field(..., min_length=1, max_length=5_000)

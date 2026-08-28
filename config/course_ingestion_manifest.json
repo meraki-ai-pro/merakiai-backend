@@ -1,0 +1,437 @@
+{
+  "schema_version": 1,
+  "knowledge_root": "../../Knowledge Files",
+  "lecturer": {
+    "name": "Samuel Addo Osei",
+    "email": "oaddosamuel@gmail.com"
+  },
+  "courses": [
+    {
+      "id": "calculus-100",
+      "name": "Introduction to Calculus",
+      "academic_level": "level_100",
+      "subject": "Calculus",
+      "description": "Level 100 foundations in limits, derivatives, antiderivatives, integration, and applied calculus.",
+      "domain_topics": [
+        "functions and limits",
+        "derivatives",
+        "applications of derivatives",
+        "antiderivatives",
+        "definite integrals",
+        "Riemann sums"
+      ],
+      "practice_mode_enabled": true,
+      "documents": [
+        {
+          "path": "Calculus/derivative_June2026.pptx",
+          "ingest": true,
+          "topic": "Functions, limits, and derivatives",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review"],
+          "difficulty": "basic",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Core introductory lecture deck; rendered successfully and contains substantive speaker notes and equations."
+        },
+        {
+          "path": "Calculus/differentiatin_Techniques_June2026.pptx",
+          "ingest": true,
+          "topic": "Differentiation techniques",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["short_answer"],
+          "rationale": "Worked differentiation methods support explanation, retrieval practice, and guided application."
+        },
+        {
+          "path": "Calculus/application_of_Derivative_June2026.pptx",
+          "ingest": true,
+          "topic": "Applications of derivatives",
+          "doc_type": "practice",
+          "default_mode": "application",
+          "target_modes": ["learn", "application"],
+          "difficulty": "intermediate",
+          "question_formats": null,
+          "rationale": "Applied examples are best suited to explanation and the UI's Assessment mode."
+        },
+        {
+          "path": "Calculus/antiderrivative_June2026.pptx",
+          "ingest": true,
+          "topic": "Antiderivatives and indefinite integrals",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review"],
+          "difficulty": "basic",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Foundational definitions, theorems, and examples."
+        },
+        {
+          "path": "Calculus/integrationTechniques_June2026.pptx",
+          "ingest": true,
+          "topic": "Integration techniques and definite integrals",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Theorem, example, and checkpoint sequence supports all three student modes."
+        },
+        {
+          "path": "Calculus/application_antiderivative_June2026.pptx",
+          "ingest": true,
+          "topic": "Applications of antiderivatives",
+          "doc_type": "practice",
+          "default_mode": "application",
+          "target_modes": ["learn", "application"],
+          "difficulty": "intermediate",
+          "question_formats": null,
+          "rationale": "Growth, decay, investment, energy-consumption, and battery-depletion scenarios fit guided Assessment mode."
+        },
+        {
+          "path": "Calculus/riemannSum_June2026.pptx",
+          "ingest": true,
+          "topic": "Riemann sums and area approximation",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Definitions, visual examples, tables, and equations support explanation and practice."
+        },
+        {
+          "path": "Calculus/Quiz01(20230617)Wds.pptxnew.pptx",
+          "ingest": true,
+          "topic": "Calculus quiz bank",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review"],
+          "difficulty": "basic",
+          "question_formats": ["mcq"],
+          "rationale": "Use only for Review: the correct choices are stored in speaker notes and must not feed Assessment scenarios."
+        },
+        {
+          "path": "Calculus/hirc1316_Semester(042025) Exam Question.docx",
+          "ingest": true,
+          "topic": "Calculus exam practice",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["mcq", "short_answer"],
+          "rationale": "Question paper without a marking key; appropriate for revision and guided problem solving."
+        },
+        {
+          "path": "Calculus/hirc1316Semester_(042026) Marking Scheme.docx",
+          "ingest": false,
+          "topic": "Calculus marking scheme",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review"],
+          "difficulty": "intermediate",
+          "question_formats": ["short_answer"],
+          "rationale": "Hold for manual QA: important equations are image-based and the current extraction is incomplete."
+        },
+        {
+          "path": "Calculus/Intro2Class_Jan2026.pptx",
+          "ingest": false,
+          "topic": "Course administration",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn"],
+          "difficulty": "basic",
+          "question_formats": null,
+          "rationale": "Exclude administrative expectations, grading rules, and dated course logistics from the student RAG corpus."
+        },
+        {
+          "path": "Calculus/Syllabus hirc1316 Introduction to Calculus.docx",
+          "ingest": false,
+          "topic": "Course administration",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn"],
+          "difficulty": "basic",
+          "question_formats": null,
+          "rationale": "Exclude syllabus administration and contact details; the teaching topics are represented by the lecture decks."
+        }
+      ]
+    },
+    {
+      "id": "statistics-100",
+      "name": "Introduction to Probability and Statistics",
+      "academic_level": "level_100",
+      "subject": "Statistics",
+      "description": "Level 100 foundations in data, probability, distributions, sampling, estimation, and statistical inference.",
+      "domain_topics": [
+        "data definition and collection",
+        "data organisation and visualisation",
+        "counting principles",
+        "probability",
+        "probability distributions",
+        "sampling",
+        "estimation",
+        "statistical inference"
+      ],
+      "practice_mode_enabled": true,
+      "documents": [
+        {
+          "path": "Statistics/hdrc2314_Jan2025_DataDefinition&Collection.pptx",
+          "ingest": true,
+          "topic": "Data definition and collection",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review"],
+          "difficulty": "basic",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Foundational definitions, variable types, collection, and data-management concepts."
+        },
+        {
+          "path": "Statistics/hdrc2314_March2025_DataOrganization&Visualizaation.pptx NEW.pptx",
+          "ingest": true,
+          "topic": "Data organisation and visualisation",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "basic",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Selected newer copy; contains tables, graphs, and software-oriented examples for all three modes."
+        },
+        {
+          "path": "Statistics/hdrc2314_April2022_DataOrganization&Visualizaation.pptx",
+          "ingest": false,
+          "topic": "Data organisation and visualisation",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn"],
+          "difficulty": "basic",
+          "question_formats": null,
+          "rationale": "Exclude as a 98.68% near-duplicate of the selected March 2025 deck."
+        },
+        {
+          "path": "Statistics/hdrc2314_Jan2026_ElementaryProbability.pptx",
+          "ingest": true,
+          "topic": "Elementary probability",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review"],
+          "difficulty": "basic",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Introduces experiments, sample spaces, events, sets, and additive rules."
+        },
+        {
+          "path": "Statistics/hdrc2314_Jan2026_Counting&Probability New template.pptx",
+          "ingest": true,
+          "topic": "Counting principles and probability",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review"],
+          "difficulty": "intermediate",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Selected current version; worked solutions make it useful for Learn and Review but not Assessment scenarios."
+        },
+        {
+          "path": "Statistics/hdrc2314_Jan2025_Counting&Probability.pptx",
+          "ingest": false,
+          "topic": "Counting principles and probability",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn"],
+          "difficulty": "intermediate",
+          "question_formats": null,
+          "rationale": "Exclude as an older, substantially overlapping version of the selected January 2026 deck."
+        },
+        {
+          "path": "Statistics/hdrc2314_Jan2026_BayesProbability.pptx",
+          "ingest": true,
+          "topic": "Conditional probability and Bayes' theorem",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Conditional probability, independence, partitions, tree diagrams, and Bayes' theorem support all modes."
+        },
+        {
+          "path": "Statistics/hdrc2314_Jan2026_Distributions.pptx",
+          "ingest": true,
+          "topic": "Random variables and probability distributions",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Covers discrete, continuous, normal, and sampling distributions; flagged math should receive OCR during ingestion."
+        },
+        {
+          "path": "Statistics/hdrc2314_Jan2026_Sampling.pptx",
+          "ingest": true,
+          "topic": "Sampling and sampling distributions",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Sampling concepts and worked examples support learning and guided statistical practice; math OCR must be verified."
+        },
+        {
+          "path": "Statistics/hdrc2314_March2025_Estimations.pptx",
+          "ingest": true,
+          "topic": "Statistical estimation",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Point and interval estimation material supports explanation and scenario-based Assessment."
+        },
+        {
+          "path": "Statistics/hdrc2314_March2025_Inferences.pptx",
+          "ingest": true,
+          "topic": "Statistical inference",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["fill_blank", "short_answer"],
+          "rationale": "Inference concepts and worked applications are appropriate after the Level 100 foundations."
+        },
+        {
+          "path": "Statistics/Midsem(20250322).pptx",
+          "ingest": true,
+          "topic": "Probability and statistics quiz bank",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review"],
+          "difficulty": "basic",
+          "question_formats": ["mcq"],
+          "rationale": "Review-only question bank; answer letters are present in speaker notes."
+        },
+        {
+          "path": "Statistics/Midsem 2_04042025_hdrc2314.pptx",
+          "ingest": true,
+          "topic": "Data visualisation and descriptive statistics review",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review"],
+          "difficulty": "intermediate",
+          "question_formats": ["mcq", "short_answer"],
+          "rationale": "Review-only: both MCQ keys and theory solutions are present in speaker notes."
+        },
+        {
+          "path": "Statistics/Quiz01_Feb2025_hdrc2314.pptx",
+          "ingest": false,
+          "topic": "Data visualisation and descriptive statistics review",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review"],
+          "difficulty": "intermediate",
+          "question_formats": ["mcq", "short_answer"],
+          "rationale": "Exclude as an 87.61% near-duplicate of the selected Midsem 2 deck, including its answer-bearing notes."
+        },
+        {
+          "path": "Statistics/Quiz 1 Week day Students.pptx",
+          "ingest": true,
+          "topic": "Applied probability for 2FA failure detection",
+          "doc_type": "practice",
+          "default_mode": "application",
+          "target_modes": ["application"],
+          "difficulty": "intermediate",
+          "question_formats": null,
+          "rationale": "A compact real-world problem suited to the UI's guided Assessment mode."
+        },
+        {
+          "path": "Statistics/Assignment 2.docx",
+          "ingest": true,
+          "topic": "Applied probability and statistics assignment",
+          "doc_type": "practice",
+          "default_mode": "application",
+          "target_modes": ["review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["short_answer"],
+          "rationale": "Question-led material without a bundled answer key supports revision and guided Assessment."
+        },
+        {
+          "path": "Statistics/hdrc2314Semester_(202604) EXAM QUESTION.docx",
+          "ingest": true,
+          "topic": "Probability and statistics final exam practice",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["mcq", "short_answer"],
+          "rationale": "Question paper supports exam revision and guided problem-solving scenarios."
+        },
+        {
+          "path": "Statistics/hdrc2314Semester_(202604)Marking scheme.docx",
+          "ingest": true,
+          "topic": "Probability and statistics worked exam solutions",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["learn", "review"],
+          "difficulty": "intermediate",
+          "question_formats": ["short_answer"],
+          "rationale": "Worked answers aid explanations and feedback; intentionally excluded from Assessment/application."
+        },
+        {
+          "path": "Statistics/MID SEMESTER EXAM.docx",
+          "ingest": true,
+          "topic": "Probability and statistics mid-semester review",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review"],
+          "difficulty": "basic",
+          "question_formats": ["mcq", "short_answer"],
+          "rationale": "Introductory exam questions are appropriate for Level 100 Review."
+        },
+        {
+          "path": "Statistics/Tutorial Questions docx.docx",
+          "ingest": true,
+          "topic": "Probability and statistics tutorial practice",
+          "doc_type": "assessment",
+          "default_mode": "review",
+          "target_modes": ["review", "application"],
+          "difficulty": "intermediate",
+          "question_formats": ["short_answer"],
+          "rationale": "Question-only tutorial is the preferred source for Review and guided Assessment."
+        },
+        {
+          "path": "Statistics/Tutorial Questions and Answers.docx",
+          "ingest": true,
+          "topic": "Probability and statistics tutorial solutions",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn", "review"],
+          "difficulty": "intermediate",
+          "question_formats": ["short_answer"],
+          "rationale": "Worked solutions support teaching and feedback; intentionally excluded from Assessment/application."
+        },
+        {
+          "path": "Statistics/hdrc2314_Jan2026_Intro2Class.pptx",
+          "ingest": false,
+          "topic": "Course administration",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn"],
+          "difficulty": "basic",
+          "question_formats": null,
+          "rationale": "Exclude administrative expectations, grading, and policies from the knowledge corpus."
+        },
+        {
+          "path": "Statistics/Syllabus hdrc2314 Probability & Statistics.docx",
+          "ingest": false,
+          "topic": "Course administration",
+          "doc_type": "knowledge",
+          "default_mode": "learn",
+          "target_modes": ["learn"],
+          "difficulty": "basic",
+          "question_formats": null,
+          "rationale": "Exclude syllabus administration and contact details; user-approved production level remains Level 100."
+        }
+      ]
+    }
+  ],
+  "pinecone_cleanup": {
+    "namespace_pattern": "^froth-flotation-(learn|review|application)(-v[0-9]+)?$",
+    "confirmation_phrase": "REMOVE_FROTH_FLOTATION_NAMESPACES"
+  }
+}

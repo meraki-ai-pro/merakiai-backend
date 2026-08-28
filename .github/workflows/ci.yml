@@ -1,0 +1,164 @@
+name: Backend CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock.txt
+
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes --requirement requirements.lock.txt
+
+      - name: Run offline unit tests
+        run: python -m pytest tests/unit -q
+
+      - name: Validate EC2 deploy script
+        run: bash -n deploy/aws/meraki-deploy
+
+      - name: Audit installed dependencies
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit --progress-spinner off
+
+  container-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: backend
+            dockerfile: Dockerfile
+          - name: manim-renderer
+            dockerfile: render.Dockerfile
+          - name: remotion-renderer
+            dockerfile: remotion.Dockerfile
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build ${{ matrix.image.name }} production image
+        run: >-
+          docker build
+          --file ${{ matrix.image.dockerfile }}
+          --tag merakiai-${{ matrix.image.name }}:${{ github.sha }}
+          .
+
+  deploy-uat:
+    name: Deploy to UAT
+    needs: [test-and-audit, container-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: uat
+      url: ${{ vars.UAT_API_URL }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy tested commit through SSM
+        id: deploy
+        env:
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          command_id="$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --parameters 'commands=["sudo /usr/local/sbin/meraki-deploy ${{ github.sha }} uat"]' \
+            --comment 'Meraki UAT ${{ github.sha }}' \
+            --query 'Command.CommandId' --output text)"
+          echo "command_id=$command_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify SSM result
+        env:
+          COMMAND_ID: ${{ steps.deploy.outputs.command_id }}
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" || true
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,Output:StandardOutputContent,Errors:StandardErrorContent}'
+          status="$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query Status --output text)"
+          test "$status" = Success
+
+      - name: Verify public UAT endpoint
+        env:
+          API_URL: ${{ vars.UAT_API_URL }}
+        run: curl --fail --show-error --silent --retry 5 --retry-delay 5 "$API_URL/health"
+
+  deploy-production:
+    name: Deploy to production
+    needs: [test-and-audit, container-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ vars.PROD_API_URL }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy tested commit through SSM
+        id: deploy
+        env:
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          command_id="$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --parameters 'commands=["sudo /usr/local/sbin/meraki-deploy ${{ github.sha }} production"]' \
+            --comment 'Meraki production ${{ github.sha }}' \
+            --query 'Command.CommandId' --output text)"
+          echo "command_id=$command_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify SSM result
+        env:
+          COMMAND_ID: ${{ steps.deploy.outputs.command_id }}
+          INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" || true
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,Output:StandardOutputContent,Errors:StandardErrorContent}'
+          status="$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+            --query Status --output text)"
+          test "$status" = Success
+
+      - name: Verify public production endpoint
+        env:
+          API_URL: ${{ vars.PROD_API_URL }}
+        run: curl --fail --show-error --silent --retry 5 --retry-delay 5 "$API_URL/health"

@@ -26,6 +26,9 @@ set is safe.
 | 010 | add_events_mastery_assessments | `events`, `mastery_states`, assessment tables |
 | 011 | add_feedback_and_lifecycle | `feedback_responses`, deletion lifecycle columns |
 | 012 | use_ghanaian_academic_levels | Level 100–600 / HND vocabulary |
+| 013 | roster_import_narration_and_upload_tags | `enrolment_invitations`, `documents.question_formats`, narration/revision columns on `media_assets`, `courses.subject` |
+| 014 | lecturer_voices | `lecturer_voices`, `courses.lecturer_voice_id` |
+| 015 | pptx knowledge uploads | `storage.buckets.allowed_mime_types` for `course-documents` |
 
 ## Dependencies worth knowing
 
@@ -39,6 +42,13 @@ which almost every later RLS policy calls.
 you have accounts that existed before enrolments did. Skipping it on a fresh
 database is correct; skipping it on an existing one locks every current student
 out, because `require_enrolment` fails closed.
+
+**013 after 003, 004, 006 and 008.** It creates policies calling
+`owns_course()`/`is_admin()`, a trigger using `touch_updated_at()`, and adds
+columns to `documents` and `media_assets`.
+
+**014 after 003 and 004.** Its policies call `is_admin()` and its trigger uses
+`touch_updated_at()`.
 
 **003 redefines `is_admin()` deliberately.** It is referenced by roughly thirty
 RLS policies. If the existing definition happened to be `role <> 'user'` rather

@@ -49,6 +49,19 @@ export interface LessonSpec {
 
 export const FPS = 30;
 
+/**
+ * Seconds each process/timeline step holds the screen, and how long a chart
+ * gets. Mirrors STEP_SECONDS / CHART_SECONDS in
+ * app/media/render/remotion_spec.py.
+ *
+ * These MUST match the Python values: the CLI is given a frame range derived
+ * from the Python duration, and the composition computes its own
+ * durationInFrames from these. A disagreement is not a slightly-wrong video,
+ * it is a hard render failure ("frame range is not inbetween").
+ */
+export const STEP_SECONDS = 4.5;
+export const CHART_SECONDS = 8;
+
 /** Fallback used when Remotion Studio is opened without --props. */
 export const DEFAULT_SPEC: LessonSpec = {
   archetype: 'process_flow',

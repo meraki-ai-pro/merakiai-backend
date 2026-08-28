@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: MerakiAI production CloudWatch dashboard, logs, and actionable alerts.
+
+Parameters:
+  InstanceId:
+    Type: AWS::EC2::Instance::Id
+    Description: Production MerakiAI EC2 instance.
+  AlertEmail:
+    Type: String
+    Description: Address that confirms and receives production alerts.
+  DashboardName:
+    Type: String
+    Default: MerakiAI-Production
+
+Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: merakiai-production-alerts
+      DisplayName: MerakiAI production
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+      TopicArn: !Ref AlertTopic
+
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /merakiai/production/application
+      RetentionInDays: 30
+  NginxErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /merakiai/production/nginx-error
+      RetentionInDays: 30
+  NginxAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /merakiai/production/nginx-access
+      RetentionInDays: 14
+  DeployLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /merakiai/production/deploy
+      RetentionInDays: 90
+  RendererLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /merakiai/production/renderers
+      RetentionInDays: 14
+
+  ApplicationErrorMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ApplicationLogGroup
+      FilterPattern: '?ERROR ?CRITICAL ?Traceback ?Exception'
+      MetricTransformations:
+        - MetricNamespace: MerakiAI/Production
+          MetricName: ApplicationErrors
+          MetricValue: '1'
+          DefaultValue: 0
+
+  StatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: merakiai-production-instance-status
+      AlarmDescription: EC2 instance or system status check is failing.
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref InstanceId
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  CpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: merakiai-production-cpu-high
+      AlarmDescription: CPU has been above 85 percent for 15 minutes.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref InstanceId
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 85
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  MemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: merakiai-production-memory-high
+      AlarmDescription: Memory has been above 85 percent for 10 minutes.
+      Namespace: MerakiAI/Production
+      MetricName: mem_used_percent
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref InstanceId
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  DiskHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: merakiai-production-disk-high
+      AlarmDescription: Root disk usage has been above 85 percent for 10 minutes.
+      Namespace: MerakiAI/Production
+      MetricName: disk_used_percent
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref InstanceId
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  ApplicationErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: merakiai-production-application-errors
+      AlarmDescription: Backend emitted ERROR, CRITICAL, Traceback, or Exception log entries.
+      Namespace: MerakiAI/Production
+      MetricName: ApplicationErrors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Ref DashboardName
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"title":"EC2 CPU and status","region":"${AWS::Region}","view":"timeSeries","metrics":[["AWS/EC2","CPUUtilization","InstanceId","${InstanceId}"],[".","StatusCheckFailed",".","."]],"stat":"Average","period":300}},
+            {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"Memory and root disk","region":"${AWS::Region}","view":"timeSeries","metrics":[["MerakiAI/Production","mem_used_percent","InstanceId","${InstanceId}"],[".","disk_used_percent",".","."]],"stat":"Average","period":300}},
+            {"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"title":"Network traffic","region":"${AWS::Region}","view":"timeSeries","metrics":[["AWS/EC2","NetworkIn","InstanceId","${InstanceId}"],[".","NetworkOut",".","."]],"stat":"Sum","period":300}},
+            {"type":"metric","x":12,"y":6,"width":12,"height":6,"properties":{"title":"Application errors","region":"${AWS::Region}","view":"timeSeries","metrics":[["MerakiAI/Production","ApplicationErrors"]],"stat":"Sum","period":300}},
+            {"type":"log","x":0,"y":12,"width":24,"height":8,"properties":{"title":"Recent backend and renderer errors","region":"${AWS::Region}","query":"SOURCE '/merakiai/production/application' | SOURCE '/merakiai/production/renderers' | fields @timestamp, @logStream, @message | filter @message like /ERROR|CRITICAL|Traceback|Exception/ | sort @timestamp desc | limit 100","view":"table"}}
+          ]
+        }
+
+Outputs:
+  DashboardUrl:
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/${DashboardName}
+  AlertTopicArn:
+    Value: !Ref AlertTopic

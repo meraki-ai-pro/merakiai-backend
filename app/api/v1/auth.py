@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.auth import auth_guard, require_mfa_if_enrolled, security
+from app.core.auth import auth_guard, require_mfa_for_password_change, security
 from app.core.rate_limit import rate_limit
 from app.db.supabase import get_supabase, get_supabase_anon
 from app.models.models import (
@@ -91,6 +91,20 @@ def signup(payload: SignUpPayload, _rl=Depends(rate_limit(max_calls=5, window_se
         except Exception as e:
             logger.error("Error upserting public.users for user_id=%s: %s", user.id, e)
 
+        # A lecturer who imported a class list before the cohort registered has
+        # pending invitations waiting on this address. Converting them here is
+        # what makes roster import work at the start of a semester, when almost
+        # nobody on the list has an account yet.
+        try:
+            get_supabase().rpc(
+                "accept_enrolment_invitations",
+                {"p_user_id": user.id, "p_email": user.email},
+            ).execute()
+        except Exception as e:  # noqa: BLE001 — sql/013 may not be applied yet
+            logger.warning(
+                "Could not accept pending enrolment invitations for %s: %s", user.email, e
+            )
+
     return {
         "user": {
             "id": getattr(user, "id", None),
@@ -125,6 +139,9 @@ def login(payload: LoginPayload, _rl=Depends(rate_limit(max_calls=10, window_sec
 
     return {
         "user": {"id": res.user.id, "email": res.user.email},
+        "must_change_password": bool(
+            (getattr(res.user, "user_metadata", None) or {}).get("must_change_password")
+        ),
         "access_token": res.session.access_token,
         "refresh_token": res.session.refresh_token,
         "expires_in": res.session.expires_in,
@@ -161,9 +178,11 @@ def reset_password(
         if not user_id:
             raise ValueError("Recovery session has no user")
 
+        metadata = dict(getattr(user, "user_metadata", None) or {})
+        metadata["must_change_password"] = False
         get_supabase().auth.admin.update_user_by_id(
             user_id,
-            {"password": payload.new_password},
+            {"password": payload.new_password, "user_metadata": metadata},
         )
     except Exception as e:
         logger.warning("Password recovery failed: %s", e)
@@ -209,6 +228,33 @@ def google_callback(code: str | None = None):
 
     session = getattr(res, "session", None)
     user = getattr(res, "user", None)
+
+    # The other account-creation path, so it needs the same invitation
+    # conversion as /signup. Idempotent: an account with nothing pending
+    # returns 0 and writes nothing.
+    if getattr(user, "id", None):
+        try:
+            # public.users first. enrolments.student_id is a foreign key to it,
+            # and on this path the row is created by a trigger whose ordering
+            # we do not control — accepting an invitation before it exists
+            # would fail and leave an imported student off their course. Only
+            # id and email are written, so a trigger that already filled in
+            # names keeps them.
+            get_supabase().table("users").upsert(
+                {"id": user.id, "email": getattr(user, "email", None)},
+                on_conflict="id",
+            ).execute()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not ensure the profile row after OAuth: %s", e)
+
+        try:
+            get_supabase().rpc(
+                "accept_enrolment_invitations",
+                {"p_user_id": user.id, "p_email": getattr(user, "email", "") or ""},
+            ).execute()
+        except Exception as e:  # noqa: BLE001 — sql/013 may not be applied yet
+            logger.warning("Could not accept pending invitations after OAuth: %s", e)
+
     return {
         "user": {"id": getattr(user, "id", None), "email": getattr(user, "email", None)},
         "session": {
@@ -256,12 +302,47 @@ def logout(
 @router.post("/update-password")
 def update_password(
     payload: UpdatePasswordPayload,
-    user=Depends(require_mfa_if_enrolled),
+    user=Depends(require_mfa_for_password_change),
+    _rl=Depends(rate_limit(max_calls=5, window_seconds=300)),
 ):
+    """Change your own password. Requires the current one.
+
+    Re-authenticating with the current password is what stops a leaked access
+    token being enough to take an account over: without it, anyone holding a
+    token for the next hour could set a password the real owner does not know
+    and keep the account for good.
+
+    Rate-limited tightly because this endpoint is also an oracle for guessing
+    the current password.
+    """
     if not payload.new_password or len(payload.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if payload.new_password == payload.current_password:
+        raise HTTPException(
+            status_code=400, detail="The new password must be different from the current one."
+        )
+
+    email = user.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="This account has no email to verify against.")
+
     try:
-        get_supabase().auth.admin.update_user_by_id(user["id"], {"password": payload.new_password})
+        reauthenticated = get_supabase_anon().auth.sign_in_with_password({
+            "email": email,
+            "password": payload.current_password,
+        })
+    except Exception:  # noqa: BLE001 — any failure here means "wrong password"
+        raise HTTPException(status_code=401, detail="Your current password is incorrect.")
+
+    try:
+        metadata = dict(
+            getattr(getattr(reauthenticated, "user", None), "user_metadata", None) or {}
+        )
+        metadata["must_change_password"] = False
+        get_supabase().auth.admin.update_user_by_id(
+            user["id"],
+            {"password": payload.new_password, "user_metadata": metadata},
+        )
     except Exception as e:
         logger.error("Password update failed for user_id=%s: %s", user["id"], e)
         raise HTTPException(status_code=400, detail="Password update failed. Please try again.")

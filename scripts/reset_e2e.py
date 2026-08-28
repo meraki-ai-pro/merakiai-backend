@@ -26,11 +26,17 @@ users = sb.table("users").select("id,email").in_("email", EMAILS).execute().data
 uids = [u["id"] for u in users]
 print("accounts:", {u["email"]: u["id"][:8] for u in users})
 
-# Sessions and their conversations, for the test accounts only.
-sessions = []
+# Sessions for the test accounts and every session attached to the disposable
+# course. A lecturer can open a course in student view, and older walkthroughs
+# therefore left sessions owned by accounts outside EMAILS. Leaving those rows
+# behind prevents the course delete through sessions_course_id_fkey.
+sessions_by_user = []
 if uids:
-    sessions = sb.table("sessions").select("id").in_("user_id", uids).execute().data or []
-sids = [s["id"] for s in sessions]
+    sessions_by_user = sb.table("sessions").select("id").in_("user_id", uids).execute().data or []
+sessions_by_course = (
+    sb.table("sessions").select("id").eq("course_id", COURSE).execute().data or []
+)
+sids = sorted({s["id"] for s in sessions_by_user + sessions_by_course})
 print("sessions to clear:", len(sids))
 
 for table, col, vals in [
@@ -48,7 +54,7 @@ for table, col, vals in [
 
 for table, col, vals in [
     ("user_feedback", "user_id", uids),
-    ("sessions", "user_id", uids),
+    ("sessions", "id", sids),
 ]:
     if not vals:
         continue
@@ -58,8 +64,18 @@ for table, col, vals in [
     except Exception as e:
         print(f"skip {table}: {str(e)[:110]}")
 
-for table in ["media_assets", "document_chunks", "documents", "enrolments",
-              "invite_codes", "assessments", "courses"]:
+# document_chunks belongs to a document, not directly to a course.
+documents = sb.table("documents").select("id").eq("course_id", COURSE).execute().data or []
+document_ids = [row["id"] for row in documents]
+if document_ids:
+    try:
+        sb.table("document_chunks").delete().in_("document_id", document_ids).execute()
+        print("cleared document_chunks")
+    except Exception as e:
+        print(f"skip document_chunks: {str(e)[:110]}")
+
+for table in ["assessment_attempts", "media_assets", "documents", "enrolments",
+              "enrolment_invitations", "invite_codes", "assessments", "courses"]:
     try:
         sb.table(table).delete().eq("course_id" if table != "courses" else "id", COURSE).execute()
         print(f"cleared {table}")

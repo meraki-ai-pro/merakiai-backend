@@ -6,6 +6,11 @@ Ref: Meraki_AI_Student_Permission_Checks §3.4
 The distinction that carries the whole design: None means "no filter needed"
 and an empty list means "nothing is visible". Conflating them either leaks
 every draft or blanks every course.
+
+_fetch() returns document ROWS, not ids: the per-student preference (question
+format, difficulty) is applied on top of the cached set and varies turn by
+turn, so the tags have to survive as far as prefer(). ids() below is what the
+mode/publish assertions actually care about.
 """
 
 import pytest
@@ -58,7 +63,16 @@ def docs(monkeypatch):
     return _apply
 
 
-def doc(did, published=True, modes=None, status="ready", deleted=None, course="maths-101"):
+def doc(
+    did,
+    published=True,
+    modes=None,
+    status="ready",
+    deleted=None,
+    course="maths-101",
+    formats=None,
+    difficulty=None,
+):
     return {
         "id": did,
         "course_id": course,
@@ -66,7 +80,14 @@ def doc(did, published=True, modes=None, status="ready", deleted=None, course="m
         "target_modes": modes,
         "status": status,
         "deleted_at": deleted,
+        "question_formats": formats,
+        "difficulty": difficulty,
     }
+
+
+def ids(rows):
+    """The document ids in a _fetch() result, preserving order."""
+    return None if rows is None else [r["id"] for r in rows]
 
 
 class TestNoFilterNeeded:
@@ -88,23 +109,23 @@ class TestNoFilterNeeded:
 class TestFiltering:
     def test_draft_documents_are_excluded(self, docs):
         docs([doc("a"), doc("b", published=False)])
-        assert vis._fetch("maths-101", "learn") == ["a"]
+        assert ids(vis._fetch("maths-101", "learn")) == ["a"]
 
     def test_deleted_documents_are_excluded(self, docs):
         docs([doc("a"), doc("b", deleted="2026-08-01T00:00:00Z")])
-        assert vis._fetch("maths-101", "learn") == ["a"]
+        assert ids(vis._fetch("maths-101", "learn")) == ["a"]
 
     def test_unfinished_documents_are_excluded(self, docs):
         """A processing or failed document has partial vectors at best."""
         docs([doc("a"), doc("b", status="processing"), doc("c", status="failed")])
-        assert vis._fetch("maths-101", "learn") == ["a"]
+        assert ids(vis._fetch("maths-101", "learn")) == ["a"]
 
     def test_mode_tags_are_honoured(self, docs):
         """A past paper tagged review-only must not surface in a Learn answer —
         this is the leak §3.5 exists to prevent."""
         docs([doc("notes", modes=["learn"]), doc("pastpaper", modes=["review"])])
-        assert vis._fetch("maths-101", "learn") == ["notes"]
-        assert vis._fetch("maths-101", "review") == ["pastpaper"]
+        assert ids(vis._fetch("maths-101", "learn")) == ["notes"]
+        assert ids(vis._fetch("maths-101", "review")) == ["pastpaper"]
 
     def test_multi_mode_document_appears_in_both(self, docs):
         """One file of worked examples serving Learn and Review — the case the
@@ -114,9 +135,9 @@ class TestFiltering:
             doc("other", modes=["review"]),
             doc("drill", modes=["application"]),
         ])
-        assert vis._fetch("maths-101", "learn") == ["worked"]
-        assert vis._fetch("maths-101", "review") == ["worked", "other"]
-        assert vis._fetch("maths-101", "application") == ["drill"]
+        assert ids(vis._fetch("maths-101", "learn")) == ["worked"]
+        assert ids(vis._fetch("maths-101", "review")) == ["worked", "other"]
+        assert ids(vis._fetch("maths-101", "application")) == ["drill"]
 
     def test_no_filter_when_every_document_serves_the_mode(self, docs):
         """All visible → None, so the Pinecone query stays exactly as before."""
@@ -126,12 +147,12 @@ class TestFiltering:
     def test_untagged_document_serves_every_mode(self, docs):
         """target_modes NULL predates the feature and must not vanish."""
         docs([doc("legacy", modes=None), doc("draft", published=False)])
-        assert vis._fetch("maths-101", "application") == ["legacy"]
+        assert ids(vis._fetch("maths-101", "application")) == ["legacy"]
 
     def test_everything_hidden_returns_empty_not_none(self, docs):
         """Empty list, not None — None would retrieve the drafts it excluded."""
         docs([doc("a", published=False), doc("b", published=False)])
-        assert vis._fetch("maths-101", "learn") == []
+        assert ids(vis._fetch("maths-101", "learn")) == []
 
     def test_other_courses_are_never_included(self, docs):
         docs([doc("a"), doc("x", published=False, course="chem-101")])

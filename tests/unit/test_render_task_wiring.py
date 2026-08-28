@@ -41,22 +41,75 @@ class TestNameAgreement:
     def test_the_api_dispatches_that_exact_name(self):
         assert TASK_NAME in _source("app/api/v1/render.py")
 
-    def test_the_route_targets_that_exact_name(self):
+    def test_there_is_no_static_route_for_the_render_task(self):
+        """The queue depends on the ASSET's renderer, not on the task name.
+
+        A static route here would override the queue= passed at dispatch and
+        send every render back to one shared queue — the bug the per-renderer
+        queues exist to prevent.
+        """
         from app.core.celery_app import celery_app
 
-        assert celery_app.conf.task_routes[TASK_NAME] == {"queue": "render_tasks"}
+        assert TASK_NAME not in celery_app.conf.task_routes
 
-    def test_the_queue_exists(self):
+    @pytest.mark.parametrize("queue_name", ["render_manim", "render_remotion"])
+    def test_each_renderer_has_its_own_queue(self, queue_name):
+        from app.core.celery_app import celery_app
+
+        assert queue_name in {q.name for q in celery_app.conf.task_queues}
+
+    @pytest.mark.parametrize(
+        "queue_name", ["render_manim", "render_remotion", "render_tasks"]
+    )
+    def test_the_render_queues_dead_letter(self, queue_name):
+        """A failed render must not vanish."""
+        from app.core.celery_app import celery_app
+
+        queue = next(q for q in celery_app.conf.task_queues if q.name == queue_name)
+        assert queue.queue_arguments.get("x-dead-letter-exchange") == "dlx"
+
+    def test_the_legacy_queue_is_still_declared(self):
+        """Messages in flight during an upgrade must not be dropped, even
+        though nothing dispatches there any more."""
         from app.core.celery_app import celery_app
 
         assert "render_tasks" in {q.name for q in celery_app.conf.task_queues}
 
-    def test_the_render_queue_dead_letters(self):
-        """A failed render must not vanish."""
-        from app.core.celery_app import celery_app
 
-        queue = next(q for q in celery_app.conf.task_queues if q.name == "render_tasks")
-        assert queue.queue_arguments.get("x-dead-letter-exchange") == "dlx"
+class TestRenderersDoNotStealEachOthersJobs:
+    """Each render image registers ONLY the renderer it carries.
+
+    On a shared queue the Remotion worker happily takes a Manim job and fails
+    with "No renderer registered under 'manim'" — which reads as a broken
+    install rather than a misrouted message, and costs roughly half the renders
+    of any deployment that serves both maths and biology.
+    """
+
+    def test_the_two_renderers_get_different_queues(self):
+        from app.media.render.routing import render_queue
+
+        assert render_queue("manim") != render_queue("remotion")
+
+    @pytest.mark.parametrize(
+        "renderer,expected",
+        [("manim", "render_manim"), ("remotion", "render_remotion")],
+    )
+    def test_queue_follows_the_renderer(self, renderer, expected):
+        from app.media.render.routing import render_queue
+
+        assert render_queue(renderer) == expected
+
+    def test_an_unknown_renderer_falls_back_rather_than_inventing_a_queue(self):
+        """A queue nothing consumes is a render that hangs for ever."""
+        from app.media.render.routing import DEFAULT_RENDERER, render_queue
+
+        assert render_queue("wizard") == f"render_{DEFAULT_RENDERER}"
+        assert render_queue("") == f"render_{DEFAULT_RENDERER}"
+
+    def test_dispatch_derives_the_queue_from_the_asset(self):
+        source = _source("app/api/v1/render.py")
+        assert "render_queue(asset[\"renderer\"])" in source
+        assert 'queue="render_tasks"' not in source
 
 
 class TestIsolationFromTheApiProcess:
@@ -72,10 +125,29 @@ class TestIsolationFromTheApiProcess:
 
     def test_the_manim_renderer_is_never_imported_at_app_import_time(self):
         """A stale import here would break `from app.main import app` on any
-        machine without manim — including the API container."""
+        machine without manim — including the API container.
+
+        Checked in a FRESH interpreter, not against this process's sys.modules.
+        Any other test that imports the renderer directly (the pacing tests do)
+        leaves it loaded, and the assertion then fails on test ordering rather
+        than on the thing it exists to catch — which is worse than useless,
+        because the obvious fix is to weaken it.
+        """
+        import subprocess
         import sys
 
-        assert "app.media.render.manim_renderer" not in sys.modules
+        probe = (
+            "import sys; import app.main; "
+            "sys.exit(1 if 'app.media.render.manim_renderer' in sys.modules else 0)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=str(BACKEND), capture_output=True, text=True, timeout=180,
+        )
+        assert result.returncode == 0, (
+            "importing app.main pulled in the manim renderer; the API container "
+            f"has no manim and would fail to start.\n{result.stderr[-800:]}"
+        )
 
     def test_celery_include_defaults_to_the_web_tasks(self):
         from app.core.celery_app import celery_app
@@ -89,8 +161,24 @@ class TestRenderWorkerConfiguration:
         missing elevenlabs/pinecone import."""
         assert "CELERY_INCLUDE=app.media.render.tasks" in _source("render.Dockerfile")
 
-    def test_the_worker_consumes_only_the_render_queue(self):
-        assert "--queues=render_tasks" in _source("render.Dockerfile")
+    def test_the_manim_worker_consumes_only_its_own_queue(self):
+        assert "--queues=render_manim" in _source("render.Dockerfile")
+        assert "render_remotion" not in _source("render.Dockerfile")
+
+    def test_the_remotion_worker_consumes_only_its_own_queue(self):
+        assert "--queues=render_remotion" in _source("remotion.Dockerfile")
+        assert "--queues=render_manim" not in _source("remotion.Dockerfile")
+
+    def test_remotion_uses_its_own_requirements(self):
+        dockerfile = _source("remotion.Dockerfile")
+        assert "requirements-remotion.txt" in dockerfile
+        assert "requirements-render.txt" not in dockerfile
+
+    def test_remotion_requirements_exclude_manim(self):
+        installed = _requirement_names("requirements-remotion.txt")
+        assert "manim" not in installed
+        for needed in ("celery", "supabase", "anthropic"):
+            assert needed in installed
 
     def test_the_worker_runs_one_render_at_a_time(self):
         """A render is CPU- and memory-bound; scale by containers, not threads."""
@@ -133,6 +221,28 @@ class TestComposeHardening:
     def test_retrieval_credentials_are_absent_from_the_render_environment(self):
         compose = _source("docker-compose.render.yml")
         for secret in ("PINECONE_API_KEY:", "OPENAI_API_KEY:", "SUPABASE_JWT_SECRET:"):
+            assert secret not in compose
+
+    def test_production_compose_runs_both_render_queues(self):
+        compose = _source("deploy/aws/docker-compose.render.production.yml")
+        assert "dockerfile: render.Dockerfile" in compose
+        assert "dockerfile: remotion.Dockerfile" in compose
+        assert "RENDERER: manim" in compose
+        assert "RENDERER: remotion" in compose
+
+    def test_production_renderers_are_hardened_and_bounded(self):
+        compose = _source("deploy/aws/docker-compose.render.production.yml")
+        assert compose.count("read_only: true") == 2
+        assert compose.count("no-new-privileges:true") == 2
+        assert compose.count("cap_drop:") == 2
+        assert compose.count("mem_limit:") == 2
+        assert compose.count("cpus:") == 2
+        assert compose.count("type: tmpfs") == 2
+        assert compose.count("mode: 0o1777") == 2
+
+    def test_production_render_environment_excludes_retrieval_secrets(self):
+        compose = _source("deploy/aws/docker-compose.render.production.yml")
+        for secret in ("PINECONE_API_KEY", "OPENAI_API_KEY", "SUPABASE_JWT_SECRET"):
             assert secret not in compose
 
 

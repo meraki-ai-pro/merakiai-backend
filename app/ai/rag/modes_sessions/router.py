@@ -14,6 +14,7 @@ from app.core.enrolment import (
 from app.core.rate_limit import rate_limit
 from app.db.supabase import get_user_client
 from app.media.stt_service import transcribe_audio
+from app.ai.rag.modes_sessions.service import GENERAL_SCENARIO
 from app.models.models import ModeSessionStartRequest, ModeSessionTurnRequest
 from app.ai.tasks import process_mode_session_start_task, process_mode_session_turn_task
 from app.core.celery_app import celery_app
@@ -22,6 +23,13 @@ router = APIRouter(prefix="/mode-sessions", tags=["Mode Sessions"])
 
 # M-5: 25 MB cap on voice audio uploads
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+# The question formats Review mode can generate. 'flashcard' was removed at the
+# client's request; 'true_false' stays because generate_review_item still has a
+# branch for it and older sessions carry it, but it is not offered in the UI.
+REVIEW_QUESTION_FORMATS = frozenset({
+    "mcq", "mcqs", "fill_blank", "short_answer", "true_false", "flashcard",
+})
 
 
 def _now_iso() -> str:
@@ -107,11 +115,27 @@ async def start_mode_session(
     supabase = get_user_client(user["token"])
 
     mode = payload.mode.lower().strip()
-    stype = payload.session_type.lower().strip()
+    stype = (payload.session_type or "").lower().strip()
     difficulty = payload.difficulty.strip().title()
 
     if mode not in ("application", "review"):
         raise HTTPException(status_code=400, detail="mode must be application or review")
+
+    if mode == "review":
+        # Review still needs a format: the generator branches on it, and
+        # defaulting silently would give a student MCQs when they picked short
+        # answer.
+        if stype not in REVIEW_QUESTION_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "session_type must be one of "
+                    f"{', '.join(sorted(REVIEW_QUESTION_FORMATS))} for review sessions."
+                ),
+            )
+    else:
+        # Assessment mode has no topic picker any more — see GENERAL_SCENARIO.
+        stype = stype or GENERAL_SCENARIO
 
     course_id = _ensure_chat_session_ownership(supabase, payload.session_id, user["id"])
 

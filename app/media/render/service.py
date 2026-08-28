@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 
 RENDERED_MEDIA_BUCKET = "rendered-media"
 
+# Read here as well as in app/media/narration.py so the render worker can mark
+# an asset 'skipped' immediately instead of queueing work that will be dropped.
+# Not imported from that module: it pulls the TTS stack, which is deliberately
+# absent from this container.
+NARRATION_ENABLED = os.getenv("RENDER_NARRATION", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+
 # Longer than the 15 minutes used for documents: a student may leave a lesson
 # open and come back to the video, and a mid-playback expiry is a bad surprise.
 _PLAYBACK_URL_TTL = 60 * 60 * 4
@@ -81,11 +89,18 @@ def request_render(
     archetype: str | None = None,
     subject: str | None = None,
     topic: str | None = None,
+    parent_asset_id: str | None = None,
+    revision_note: str | None = None,
+    revision: int = 1,
 ) -> dict:
     """Create or reuse a render job. Returns the media_assets row.
 
     Re-requesting an unchanged concept is a cache hit, not a second job — a
     multi-minute render must not be repeated because someone clicked twice.
+
+    ``parent_asset_id`` marks this as a lecturer's revision of an earlier
+    video. The cache still applies: reverting a prompt to exactly what it was
+    two revisions ago returns the render that was already made from it.
     """
     renderer = route(archetype, subject)
     digest = content_hash(source_script)
@@ -106,24 +121,33 @@ def request_render(
         ).eq("id", existing["id"]).execute()
         return {**existing, "status": "queued", "error": None}
 
-    row = (
-        get_supabase()
-        .table("media_assets")
-        .insert({
-            "course_id": course_id,
-            "concept_key": concept_key,
-            "topic": topic,
-            "type": "video",
-            "renderer": renderer,
-            "archetype": archetype,
-            "source_script": source_script,
-            "content_hash": digest,
-            "status": "queued",
-            "created_by": user_id,
-        })
-        .execute()
-        .data
-    )
+    new_row = {
+        "course_id": course_id,
+        "concept_key": concept_key,
+        "topic": topic,
+        "type": "video",
+        "renderer": renderer,
+        "archetype": archetype,
+        "source_script": source_script,
+        "content_hash": digest,
+        "status": "queued",
+        "created_by": user_id,
+    }
+    revision_fields = {
+        "parent_asset_id": parent_asset_id,
+        "revision": revision,
+        "revision_note": revision_note,
+    }
+
+    sb = get_supabase()
+    try:
+        row = sb.table("media_assets").insert({**new_row, **revision_fields}).execute().data
+    except Exception as exc:  # noqa: BLE001 — sql/013 may not be applied yet
+        logger.warning(
+            "media_assets rejected the revision columns; queueing without them. "
+            "Apply sql/013_roster_import_narration_and_upload_tags.sql: %s", exc,
+        )
+        row = sb.table("media_assets").insert(new_row).execute().data
 
     if not row:
         raise RuntimeError("Failed to create render job")
@@ -136,6 +160,21 @@ def request_render(
 
 def mark(asset_id: str, **fields: Any) -> None:
     get_supabase().table("media_assets").update(fields).eq("id", asset_id).execute()
+
+
+def _mark_optional(asset_id: str, **fields: Any) -> None:
+    """mark(), for columns a database that predates sql/013 may not have.
+
+    Narration bookkeeping must never fail a render that has already produced a
+    watchable video.
+    """
+    try:
+        mark(asset_id, **fields)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not write %s on asset %s; apply sql/013: %s",
+            ", ".join(fields), asset_id, exc,
+        )
 
 
 async def execute_render(asset_id: str) -> dict:
@@ -197,15 +236,54 @@ async def execute_render(asset_id: str) -> dict:
         completed_at="now()",
     )
 
+    narration_queued = _queue_narration(asset_id)
+
     # Deliberately not "available to students" — it is awaiting review.
     # Proposal §10 makes lecturer sign-off the mitigation for notation errors.
     _publish(
         course_id,
         {"type": "render_status", "asset_id": asset_id, "status": "ready",
-         "awaiting_review": True},
+         "awaiting_review": True, "narrating": narration_queued},
     )
     logger.info("Render ready  asset=%s  path=%s", asset_id, path)
-    return {"status": "ready", "asset_id": asset_id, "storage_path": path}
+    return {
+        "status": "ready",
+        "asset_id": asset_id,
+        "storage_path": path,
+        "narration_queued": narration_queued,
+    }
+
+
+def _queue_narration(asset_id: str) -> bool:
+    """Hand the silent render to the media worker to have a voice added.
+
+    Dispatched BY NAME, like the render task itself and for the same reason in
+    reverse: this code runs inside the render container, which has no
+    ElevenLabs client and no ffmpeg-backed media stack. Importing the narration
+    task here would fail at import time; publishing a message does not.
+
+    Best-effort. A broker hiccup costs the narration, not the render — the
+    asset is already `ready` and the lecturer can review a silent video.
+    """
+    if not NARRATION_ENABLED:
+        _mark_optional(asset_id, narration_status="skipped")
+        return False
+
+    try:
+        from app.core.celery_app import celery_app
+
+        celery_app.send_task(
+            "app.ai.tasks.process_narration_task",
+            args=[asset_id],
+            queue="video_tasks",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not queue narration for asset %s: %s", asset_id, exc)
+        _mark_optional(asset_id, narration_status="failed")
+        return False
+
+    _mark_optional(asset_id, narration_status="pending")
+    return True
 
 
 def approved_concept_keys(course_id: str) -> list[str]:
@@ -234,21 +312,37 @@ def approved_concept_keys(course_id: str) -> list[str]:
     return sorted({r["concept_key"] for r in rows if r.get("concept_key")})
 
 
+_PLAYABLE_COLUMNS = "id, concept_key, storage_path, duration_seconds, archetype, renderer"
+
+
 def playable_asset(course_id: str, concept_key: str) -> dict | None:
     """The approved video for a concept, with a playback URL. None if there
     is not one — the caller falls back to the Lesson Board."""
-    rows = (
-        get_supabase()
-        .table("media_assets")
-        .select("id, concept_key, storage_path, duration_seconds, archetype, renderer")
-        .eq("course_id", course_id)
-        .eq("concept_key", concept_key)
-        .eq("status", "ready")
-        .not_.is_("approved_at", "null")
-        .limit(1)
-        .execute()
-        .data
-    )
+
+    def _query(columns: str):
+        return (
+            get_supabase()
+            .table("media_assets")
+            .select(columns)
+            .eq("course_id", course_id)
+            .eq("concept_key", concept_key)
+            .eq("status", "ready")
+            .not_.is_("approved_at", "null")
+            # Newest approval wins. Regeneration means one concept can have
+            # several approved renders, and without an explicit order the
+            # student would get whichever row Postgres happened to return —
+            # quite possibly the one the lecturer replaced.
+            .order("approved_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+
+    try:
+        rows = _query(f"{_PLAYABLE_COLUMNS}, has_audio")
+    except Exception:  # noqa: BLE001 — sql/013 may not be applied yet
+        rows = _query(_PLAYABLE_COLUMNS)
+
     if not rows:
         return None
 
