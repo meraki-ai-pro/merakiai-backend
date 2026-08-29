@@ -45,3 +45,11 @@ def test_production_workflow_bootstraps_the_versioned_deploy_helper():
 
     assert "raw.githubusercontent.com/meraki-ai-pro/merakiai-backend/${{ github.sha }}" in workflow
     assert "sudo install --owner root --group root --mode 0755" in workflow
+
+
+def test_deployment_waits_long_enough_for_a_cold_renderer_build():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "aws ssm wait command-executed" not in workflow
+    assert workflow.count("for attempt in $(seq 1 60)") == 2
+    assert workflow.count("Success|Failed|Cancelled|TimedOut|Cancelling") == 2
