@@ -19,7 +19,9 @@ FROM python:3.12-slim
 # This is a deliberately MINIMAL TeX set. Manim's own Debian instructions list
 # `texlive texlive-latex-extra texlive-fonts-extra texlive-science tipa`, which
 # is a 1069 MB download — most of it texlive-fonts-extra, pulled in only
-# because Manim's DEFAULT tex template loads calligra and physics.
+# because Manim's DEFAULT tex template loads calligra and physics. The much
+# smaller texlive-latex-extra package is still required: it provides
+# standalone.cls, the document class used by Manim's cropped SVG template.
 #
 # app/media/render/manim_renderer.py writes its own minimal tex template
 # (amsmath, amssymb, mathrsfs, xcolor) instead, so those packages are not
@@ -36,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         texlive-latex-base \
         texlive-latex-recommended \
+        texlive-latex-extra \
         texlive-fonts-recommended \
         texlive-science \
         dvisvgm \
