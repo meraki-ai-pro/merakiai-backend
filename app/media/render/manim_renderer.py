@@ -233,6 +233,68 @@ def _render_env(workdir: Path) -> dict[str, str]:
     return render_env(workdir, {"PYTHONDONTWRITEBYTECODE": "1"})
 
 
+def _latex_diagnostic(workdir: Path) -> str:
+    """Return the useful part of Manim's newest LaTeX compiler log.
+
+    Manim's console traceback only says that conversion to DVI failed.  The
+    actual bad command or delimiter is written to ``media/Tex/*.log``.  Keep
+    the error and a little surrounding context so the model's repair attempt
+    can correct the expression instead of seeing the same generic traceback.
+    """
+    tex_dir = workdir / "media" / "Tex"
+    try:
+        logs = sorted(
+            tex_dir.glob("*.log"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return ""
+
+    if not logs:
+        return ""
+
+    try:
+        lines = logs[0].read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+
+    markers = (
+        "! ",
+        "latex error",
+        "undefined control sequence",
+        "missing $",
+        "missing }",
+        "extra }",
+        "double superscript",
+        "double subscript",
+        "runaway argument",
+        "emergency stop",
+    )
+    interesting = [
+        index
+        for index, line in enumerate(lines)
+        if line.lstrip().startswith("!")
+        or line.lstrip().startswith("l.")
+        or any(marker in line.lower() for marker in markers)
+    ]
+    if not interesting:
+        return ""
+
+    selected: list[str] = []
+    seen: set[int] = set()
+    for index in interesting[:8]:
+        for nearby in range(max(0, index - 1), min(len(lines), index + 3)):
+            if nearby not in seen:
+                seen.add(nearby)
+                selected.append(lines[nearby])
+
+    detail = "\n".join(selected).strip()
+    if not detail:
+        return ""
+    return f"LaTeX compiler diagnostic:\n{detail}"[:2500]
+
+
 def _run_manim(scene_path: Path, scene_name: str, workdir: Path) -> tuple[int, str]:
     """Execute manim as a subprocess. Returns (exit code, combined output)."""
     import subprocess
@@ -266,7 +328,12 @@ def _run_manim(scene_path: Path, scene_name: str, workdir: Path) -> tuple[int, s
     except subprocess.TimeoutExpired:
         return 124, f"Render exceeded the {RENDER_TIMEOUT_SECONDS}s time limit."
 
-    return proc.returncode, f"{proc.stdout}\n{proc.stderr}".strip()
+    output = f"{proc.stdout}\n{proc.stderr}".strip()
+    if proc.returncode != 0:
+        diagnostic = _latex_diagnostic(workdir)
+        if diagnostic:
+            output = f"{diagnostic}\n\nRenderer output (tail):\n{output[-1000:]}"
+    return proc.returncode, output
 
 
 class ManimRenderer:
@@ -319,7 +386,7 @@ class ManimRenderer:
 
             code, output = _run_manim(scene_path, scene_name, workdir)
             if code != 0:
-                return output[-2000:] or f"manim exited with status {code}"
+                return output[:2000] or f"manim exited with status {code}"
 
             video = _find_output(workdir / "media")
             if not video:
