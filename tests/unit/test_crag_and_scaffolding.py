@@ -122,6 +122,42 @@ class TestHonestFailureDirective:
         assert "RETRIEVAL WAS WEAK" not in system
 
 
+class TestDeterministicHonestFailure:
+    def test_plain_answer_gets_a_course_material_notice(self):
+        from app.ai.rag.service import _ensure_failure_disclaimer
+
+        answer, suffix = _ensure_failure_disclaimer(
+            "Here is a general explanation.", board=False, concise=False
+        )
+
+        assert "reference material from your course notes" in answer
+        assert suffix and answer.endswith(suffix)
+
+    def test_board_answer_gets_a_final_notice_slide(self):
+        from app.ai.rag.service import _ensure_failure_disclaimer
+
+        answer, suffix = _ensure_failure_disclaimer(
+            "::: slide Explanation\nGeneral knowledge.\n:::",
+            board=True,
+            concise=False,
+        )
+
+        assert "::: slide Course material note" in suffix
+        assert answer.endswith(":::")
+        assert "reference material" in suffix
+
+    def test_model_written_notice_is_not_duplicated(self):
+        from app.ai.rag.service import _ensure_failure_disclaimer
+
+        original = "I do not have reference material for that topic."
+        answer, suffix = _ensure_failure_disclaimer(
+            original, board=True, concise=False
+        )
+
+        assert answer == original
+        assert suffix == ""
+
+
 class TestProgressiveScaffolding:
     """Ghanaian levels — students say "Level 200", not "intermediate"."""
 
