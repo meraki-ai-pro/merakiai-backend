@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, Optional
 
 import redis as redis_sync
@@ -30,6 +31,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 DID_BASE_URL = os.getenv("DID_BASE_URL", "https://api.d-id.com")
+DID_AGENT_LLM_MODEL = os.getenv("DID_AGENT_LLM_MODEL", "gpt-4.1-mini")
 
 
 def _headers() -> dict:
@@ -112,7 +114,7 @@ def _create_agent(presenter_id: str) -> str:
         "llm": {
             "type": "openai",
             "provider": "openai",
-            "model": "gpt-4o-mini",
+            "model": DID_AGENT_LLM_MODEL,
             "api_key": openai_key,
             "instructions": "You are a helpful AI tutor. Answer concisely.",
         },
@@ -128,7 +130,7 @@ def _create_agent(presenter_id: str) -> str:
     if r.status_code >= 400:
         raise DidAgentError(
             f"D-ID create agent [{r.status_code}]: "
-            f"{r.json() if _is_json(r) else r.text}"
+            f"{_safe_response(r)}"
         )
 
     data = r.json()
@@ -177,7 +179,7 @@ def create_stream(
     if r.status_code >= 400:
         raise DidAgentError(
             f"D-ID create stream [{r.status_code}]: "
-            f"{r.json() if _is_json(r) else r.text}"
+            f"{_safe_response(r)}"
         )
 
     data = r.json()
@@ -242,7 +244,7 @@ def submit_sdp_answer(
     if r.status_code >= 400:
         raise DidAgentError(
             f"D-ID SDP answer [{r.status_code}]: "
-            f"{r.json() if _is_json(r) else r.text}"
+            f"{_safe_response(r)}"
         )
     logger.debug("SDP answer submitted  agent=%s  stream=%s", agent_id, stream_id)
 
@@ -291,7 +293,7 @@ def submit_ice_candidate(
     if r.status_code >= 400:
         raise DidAgentError(
             f"D-ID ICE candidate [{r.status_code}]: "
-            f"{r.json() if _is_json(r) else r.text}"
+            f"{_safe_response(r)}"
         )
     logger.debug("ICE candidate submitted  agent=%s  stream=%s", agent_id, stream_id)
 
@@ -326,11 +328,11 @@ def speak(
     if r.status_code >= 400:
         raise DidAgentError(
             f"D-ID speak [{r.status_code}]: "
-            f"{r.json() if _is_json(r) else r.text}"
+            f"{_safe_response(r)}"
         )
     logger.info(
-        "D-ID speak dispatched  agent=%s  stream=%s  audio=%s",
-        agent_id, stream_id, audio_url,
+        "D-ID speak dispatched  agent=%s  stream=%s  audio_url_set=%s",
+        agent_id, stream_id, bool(audio_url),
     )
 
 
@@ -373,3 +375,33 @@ def evict_stream_cache(app_session_id: str) -> None:
 
 def _is_json(r: requests.Response) -> bool:
     return "application/json" in (r.headers.get("content-type") or "").lower()
+
+
+_SECRET_KEY_PARTS = ("api_key", "authorization", "access_token", "secret", "token")
+_OPENAI_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{20,}")
+
+
+def _redact_secrets(value: Any) -> Any:
+    """Recursively remove credentials third-party validation errors echo."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if any(part in str(key).lower() for part in _SECRET_KEY_PARTS)
+                else _redact_secrets(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    if isinstance(value, str):
+        return _OPENAI_KEY_PATTERN.sub("[REDACTED]", value)
+    return value
+
+
+def _safe_response(r: requests.Response) -> Any:
+    try:
+        body: Any = r.json() if _is_json(r) else r.text
+    except Exception:
+        body = r.text
+    return _redact_secrets(body)
