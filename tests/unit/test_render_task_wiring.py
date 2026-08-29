@@ -165,6 +165,11 @@ class TestRenderWorkerConfiguration:
         assert "--queues=render_manim" in _source("render.Dockerfile")
         assert "render_remotion" not in _source("render.Dockerfile")
 
+    def test_manim_image_installs_the_standalone_latex_class(self):
+        """MathTex uses documentclass{standalone}; Debian ships that class in
+        texlive-latex-extra."""
+        assert "texlive-latex-extra" in _source("render.Dockerfile")
+
     def test_the_remotion_worker_consumes_only_its_own_queue(self):
         assert "--queues=render_remotion" in _source("remotion.Dockerfile")
         assert "--queues=render_manim" not in _source("remotion.Dockerfile")
