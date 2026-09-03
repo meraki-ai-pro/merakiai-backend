@@ -79,7 +79,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: aws-actions/configure-aws-credentials@v6.2.3
+      - uses: aws-actions/configure-aws-credentials@v6.2.4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -135,7 +135,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: aws-actions/configure-aws-credentials@v6.2.3
+      - uses: aws-actions/configure-aws-credentials@v6.2.4
         with:
           # Repository/environment variables remain override points, while the
           # verified production identifiers keep a missing variable from
