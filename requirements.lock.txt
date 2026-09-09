@@ -3310,9 +3310,9 @@ tzlocal==5.4.4 \
     --hash=sha256:8dbb8660838688a7b6ba4fed31d18dedf842afb4d47ca050d6d891c2c15f3be4 \
     --hash=sha256:aae09f0126a8a86fa736be266eb4a471380d26a0de3bc14844e7821fee3e2a15
     # via celery
-unstructured==0.22.21 \
-    --hash=sha256:6c1e8030299f2fe20f37b903b6a0291d53028bdd4b3054bfe83b4efdaf921b5c \
-    --hash=sha256:8ebb44e6ed4b089872e841161d6fde9b9dee1ce207f048756a2538e0125da9cc
+unstructured==0.24.0 \
+    --hash=sha256:23824fc1628109aa8c3fd03ac1423c5056e1d80e8357bfd76c03aa5b5b614837 \
+    --hash=sha256:8f98b2f1be057acff67df7be3a8a2b69a3e09c4543beb923ffa42d15d057d1b0
     # via -r requirements.txt
 unstructured-client==0.46.2 \
     --hash=sha256:42fe6d56631fcfb4e942db2c9304002aa39d7169fe4fc657760f013afb32e720 \
