@@ -11,7 +11,7 @@ from app.core.enrolment import (
     require_enrolment,
     require_mode_enabled,
 )
-from app.db.supabase import get_user_client
+from app.db.supabase import get_supabase, get_user_client
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET, signed_url
 from app.models.models import VideoToggle, SessionModeUpdate, SessionCreateRequest, SessionTitleUpdate
 
@@ -48,6 +48,54 @@ def _validate_uuid(value: str) -> str:
         return str(uuid.UUID(value))
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail="Invalid session ID format")
+
+
+def _delete_session_uploads(supabase, user_id: str, session_id: str) -> int:
+    """Remove private images stored beneath ``user/session`` before DB rows.
+
+    Conversation rows contain the only durable references to these objects.
+    Removing storage first prevents a successful database delete from leaving
+    photographs of a student's work orphaned in the bucket.
+    """
+    folder = f"{user_id}/{session_id}"
+    entries = supabase.storage.from_(STUDENT_UPLOADS_BUCKET).list(folder) or []
+    paths = []
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else getattr(entry, "name", None)
+        if name:
+            paths.append(f"{folder}/{name}")
+    if paths:
+        supabase.storage.from_(STUDENT_UPLOADS_BUCKET).remove(paths)
+    return len(paths)
+
+
+def _delete_session_data(supabase, session_id: str) -> None:
+    """Delete one session's data in foreign-key-safe order.
+
+    The production schema predates cascade deletes on session foreign keys, so
+    the API must remove child rows explicitly. Analytics and feedback that are
+    intentionally retained lose their session pointer instead of blocking the
+    parent delete.
+    """
+    for table in ("user_feedback", "feedback_responses", "events"):
+        supabase.table(table).update({"session_id": None}).eq(
+            "session_id", session_id
+        ).execute()
+
+    for table in (
+        "session_state",
+        "mode_feedback",
+        "review_attempts",
+        "review_summaries",
+        "session_surveys",
+        "conversations",
+        "mode_sessions",
+        "request_metrics",
+        "ws_sessions",
+    ):
+        supabase.table(table).delete().eq("session_id", session_id).execute()
+
+    supabase.table("sessions").delete().eq("id", session_id).execute()
 
 
 @router.get("/")
@@ -195,6 +243,39 @@ def get_session(session_id: str, user=Depends(auth_guard)):
         "prefers_video": row["prefers_video"],
         "started_at": row.get("started_at"),
         "ended_at": row.get("ended_at"),
+    }
+
+
+@router.delete("/{session_id}")
+def delete_session(session_id: str, user=Depends(auth_guard)):
+    """Permanently delete a session owned by the authenticated user."""
+    sid = _validate_uuid(session_id)
+
+    # Authorise with the caller's JWT and an explicit owner predicate. RLS is
+    # the primary boundary; the user_id filter is defence in depth and keeps a
+    # clean 404 response for both missing and somebody else's sessions.
+    owned = (
+        get_user_client(user["token"])
+        .table("sessions")
+        .select("id,user_id")
+        .eq("id", sid)
+        .eq("user_id", user["id"])
+        .execute()
+    )
+    if not owned.data:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Deleting child rows needs the service role because those historical
+    # tables do not all expose DELETE policies. Ownership was established
+    # above before crossing that boundary.
+    supabase = get_supabase()
+    removed_uploads = _delete_session_uploads(supabase, user["id"], sid)
+    _delete_session_data(supabase, sid)
+
+    return {
+        "session_id": sid,
+        "status": "deleted",
+        "storage_objects_deleted": removed_uploads,
     }
 
 
