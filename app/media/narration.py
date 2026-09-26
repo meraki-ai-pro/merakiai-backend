@@ -22,11 +22,13 @@ shows it rather than pretending the video is finished.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.db.supabase import get_supabase
@@ -89,6 +91,207 @@ Cut detail rather than exceed it. Shorter is always fine.
 no "in this video we will".
 - Accuracy over polish. If the animation shows a step, say what that step does \
 and why, not that it is "important" or "interesting"."""
+
+
+# ── Beat-aligned narration ──────────────────────────────────────────────────
+#
+# One narration track sized only to the video's TOTAL length drifts: the voice
+# reaches step three while step two is still animating, and whatever it
+# overshoots plays over a frozen last frame. The client heard exactly that.
+#
+# So when the renderer recorded its beats (media_assets.beats), narration is
+# written as lines that each START on a beat, every line is voiced on its own,
+# and each is laid over its own stretch of video. Where a line is shorter than
+# its stretch the animation carries on under silence; where it is longer, that
+# stretch's last frame holds until the voice finishes. Either way the next line
+# begins exactly as its own visual does, so drift cannot accumulate.
+
+# Breathing room after each line before the next visual starts.
+_LINE_GAP_SECONDS = 0.3
+
+_ALIGNED_SYSTEM = """You write the spoken narration for a short educational \
+animation, line by line, so that each line is heard while its part of the \
+animation is on screen.
+
+You are given the animation's BEATS: numbered, timed stretches of what is on \
+screen, in order. Return JSON only, of the form:
+
+{{"lines": [{{"from": 0, "text": "..."}}, {{"from": 3, "text": "..."}}]}}
+
+Rules:
+- "from" is the beat at which that line STARTS. The line plays until the next \
+line's beat. The first line must start at beat 0; "from" values strictly increase.
+- Group beats: a line usually covers several short beats. Start a new line \
+where something new appears that deserves its own sentence.
+- Each line fits its stretch: about {words_per_second} words per second of the \
+beats it covers. A line that runs long freezes the picture until it ends, so \
+err short.
+- Narrate what is ON SCREEN in that stretch. Write mathematics as it is said \
+aloud ("d y by d x", "x squared"); never LaTeX, carets or underscores.
+- Plain sentences, British spelling, calm tone. No greetings, no "in this video".
+- A beat that is only a pause can share the previous line or stay silent."""
+
+
+def plan_segments(
+    beats: list[dict], lines: list[dict], total_seconds: float | None = None
+) -> list[dict]:
+    """Turn the model's lines into contiguous ``{start, end, text}`` segments.
+
+    Defensive, because the lines come from a model: out-of-range and repeated
+    beat indices are dropped, the first line is pinned to the start, and the
+    last segment runs to the end of the video. Every second of video belongs to
+    exactly one segment, so the mux never drops or duplicates footage.
+    """
+    if not beats:
+        return []
+    by_start: dict[int, str] = {}
+    for line in lines:
+        try:
+            index = int(line.get("from"))
+        except (TypeError, ValueError):
+            continue
+        text = " ".join(str(line.get("text") or "").split())
+        if 0 <= index < len(beats) and text and index not in by_start:
+            by_start[index] = text
+    if not by_start:
+        return []
+
+    starts = sorted(by_start)
+    if starts[0] != 0:
+        # Nothing may play before the first line's footage is accounted for.
+        by_start[0] = by_start.pop(starts[0])
+        starts = sorted(by_start)
+
+    end_of_video = total_seconds or float(beats[-1]["end"])
+    segments = []
+    for i, index in enumerate(starts):
+        start = float(beats[index]["start"])
+        end = float(beats[starts[i + 1]]["start"]) if i + 1 < len(starts) else end_of_video
+        segments.append({"start": start, "end": end, "text": by_start[index]})
+    return segments
+
+
+def aligned_filter(segments: list[dict], audio_seconds: list[float], fps: float) -> tuple[str, float]:
+    """The ffmpeg filter graph laying each line over its own stretch of video.
+
+    Returns ``(filter, total_seconds)``. Input 0 is the video, input i+1 the
+    audio for segment i.
+
+    ``fps`` is not decoration: ``tpad`` after ``trim`` silently does nothing
+    unless the frame rate is re-established first (verified on ffmpeg 7.1), so
+    without it an overrunning line would play over the NEXT visual — the exact
+    drift this exists to remove.
+    """
+    parts, joins, total = [], [], 0.0
+    for i, (segment, spoken) in enumerate(zip(segments, audio_seconds)):
+        span = max(0.0, segment["end"] - segment["start"])
+        hold = max(0.0, spoken + _LINE_GAP_SECONDS - span)
+        length = span + hold
+        video = (
+            f"[0:v]trim=start={segment['start']:.3f}:end={segment['end']:.3f},"
+            f"setpts=PTS-STARTPTS,fps={fps:g}"
+        )
+        if hold > 0.05:
+            video += f",tpad=stop_mode=clone:stop_duration={hold:.3f}"
+        parts.append(f"{video}[v{i}]")
+        parts.append(
+            f"[{i + 1}:a]aformat=sample_rates=44100:channel_layouts=mono,"
+            f"apad=whole_dur={length:.3f},atrim=0:{length:.3f},asetpts=PTS-STARTPTS[a{i}]"
+        )
+        joins.append(f"[v{i}][a{i}]")
+        total += length
+    parts.append(f"{''.join(joins)}concat=n={len(segments)}:v=1:a=1[v][a]")
+    return ";".join(parts), total
+
+
+def _probe_fps(path: Path) -> float:
+    try:
+        proc = subprocess.run(
+            [_binary("ffprobe"), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        num, _, den = proc.stdout.strip().partition("/")
+        fps = float(num) / float(den or 1)
+        return fps if 1 <= fps <= 120 else 30.0
+    except (OSError, subprocess.SubprocessError, ValueError, ZeroDivisionError):
+        return 30.0
+
+
+async def build_aligned_lines(
+    *,
+    concept_key: str,
+    topic: str | None,
+    source_script: str,
+    scene_code: str | None,
+    beats: list[dict],
+) -> list[dict]:
+    """Ask the model for narration lines keyed to beats. [] on any failure."""
+    from app.ai.rag.claude import generate_response
+    from app.ai.rag.modes_sessions.service import safe_parse_json_with_retry
+
+    # Same measured rate and overshoot allowance as the single-track budget.
+    words_per_second = round(_WORDS_PER_SECOND / _BUDGET_OVERSHOOT_ALLOWANCE, 2)
+    system = _ALIGNED_SYSTEM.format(words_per_second=words_per_second)
+
+    beat_lines = "\n".join(
+        f"{i}. {b['start']:.1f}s to {b['end']:.1f}s ({b['end'] - b['start']:.1f}s): {b.get('label', '')}"
+        for i, b in enumerate(beats)
+    )
+    prompt = (
+        f"Concept: {concept_key}\nTopic: {topic or 'not specified'}\n\n"
+        f"BEATS:\n{beat_lines}\n\n"
+        f"The lesson script this animation was built from:\n{source_script}\n"
+    )
+    if scene_code:
+        prompt += (
+            "\nThe animation source that was executed (for Manim, beat k is the "
+            f"k-th self.play or self.wait call to run, loops included):\n{scene_code[:12000]}\n"
+        )
+
+    async def _ask() -> str:
+        return await generate_response(
+            prompt=prompt, mode="scene_generation",
+            system_parts=[{"type": "text", "text": system}],
+        )
+
+    try:
+        parsed = await safe_parse_json_with_retry(await _ask(), _ask, label="narration lines")
+    except Exception as exc:  # noqa: BLE001 — fall back to the single-track path
+        logger.warning("Aligned narration plan failed for %s: %s", concept_key, exc)
+        return []
+    lines = parsed.get("lines") if isinstance(parsed, dict) else None
+    return [
+        {"from": line.get("from"), "text": _clean_script(str(line.get("text") or ""))}
+        for line in (lines or []) if isinstance(line, dict)
+    ]
+
+
+def mux_aligned(video_path: Path, segments: list[dict], audio_paths: list[Path], out_path: Path) -> bool:
+    """Lay each line over its own stretch of video. True on success."""
+    durations = [probe_duration(p) or 0.0 for p in audio_paths]
+    graph, _ = aligned_filter(segments, durations, _probe_fps(video_path))
+
+    cmd = [_binary("ffmpeg"), "-y", "-i", str(video_path)]
+    for path in audio_paths:
+        cmd += ["-i", str(path)]
+    cmd += [
+        "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k", str(out_path),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT,
+            encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.error("ffmpeg aligned mux failed: %s", exc)
+        return False
+    if proc.returncode != 0:
+        logger.error("ffmpeg aligned mux exited %s: %s", proc.returncode, proc.stderr[-1500:])
+        return False
+    return out_path.exists() and out_path.stat().st_size > 0
 
 
 def _resolve_voice_id(course_id: str | None = None) -> str | None:
@@ -245,7 +448,6 @@ async def narrate_asset(asset_id: str) -> dict:
     render because the TTS provider was down would not be.
     """
     from app.media.render.service import RENDERED_MEDIA_BUCKET
-    from app.media.storage_service import upload_rendered_media
 
     sb = get_supabase()
     rows = sb.table("media_assets").select("*").eq("id", asset_id).execute().data
@@ -284,6 +486,17 @@ async def narrate_asset(asset_id: str) -> dict:
             return {"asset_id": asset_id, "status": "failed", "reason": "download failed"}
 
         duration = probe_duration(video_path) or asset.get("duration_seconds")
+        out_path = workdir / "narrated.mp4"
+
+        beats = asset.get("beats")
+        if isinstance(beats, str):
+            beats = json.loads(beats)
+        if isinstance(beats, list) and len(beats) >= 2:
+            aligned = await _narrate_aligned(asset, beats, duration, voice_id, video_path, out_path, workdir)
+            if aligned:
+                return await _finish(asset, aligned, out_path, duration)
+            # Fall through: a single track is worse, but far better than silence.
+            logger.warning("Aligned narration failed for %s; using a single track", asset_id)
 
         script = await build_narration_script(
             concept_key=asset.get("concept_key") or "",
@@ -308,27 +521,69 @@ async def narrate_asset(asset_id: str) -> dict:
         audio_path = workdir / "narration.mp3"
         audio_path.write_bytes(audio)
 
-        out_path = workdir / "narrated.mp4"
         if not mux(video_path, audio_path, out_path):
             _mark(asset_id, narration_status="failed", narration_script=script)
             return {"asset_id": asset_id, "status": "failed", "reason": "could not mux audio"}
 
-        path = upload_rendered_media(
-            asset["course_id"], asset_id, out_path.read_bytes(), "video/mp4", "mp4"
-        )
-        if not path:
-            _mark(asset_id, narration_status="failed", narration_script=script)
-            return {"asset_id": asset_id, "status": "failed", "reason": "upload failed"}
-
-        _mark(
-            asset_id,
-            narration_status="ready",
-            narration_script=script,
-            has_audio=True,
-            storage_path=path,
-            duration_seconds=probe_duration(out_path) or duration,
-        )
-        logger.info("Narration ready  asset=%s  words=%d", asset_id, len(script.split()))
-        return {"asset_id": asset_id, "status": "ready", "words": len(script.split())}
+        return await _finish(asset, script, out_path, duration)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def _narrate_aligned(
+    asset: dict, beats: list[dict], duration: float | None, voice_id: str,
+    video_path: Path, out_path: Path, workdir: Path,
+) -> str | None:
+    """Beat-aligned narration into ``out_path``. Returns the script, or None."""
+    lines = await build_aligned_lines(
+        concept_key=asset.get("concept_key") or "",
+        topic=asset.get("topic"),
+        source_script=asset.get("source_script") or "",
+        scene_code=asset.get("scene_code"),
+        beats=beats,
+    )
+    segments = plan_segments(beats, lines, duration)
+    if not segments:
+        return None
+
+    try:
+        # Lines are independent requests; a handful at once keeps a 10-line
+        # video from waiting on ten sequential round trips.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            clips = list(pool.map(lambda seg: synthesize(seg["text"], voice_id), segments))
+    except Exception as exc:  # noqa: BLE001 — provider outage, bad key, quota
+        logger.error("TTS failed for aligned narration of %s: %s", asset.get("id"), exc)
+        return None
+
+    audio_paths = []
+    for i, clip in enumerate(clips):
+        path = workdir / f"line-{i:02d}.mp3"
+        path.write_bytes(clip)
+        audio_paths.append(path)
+
+    if not mux_aligned(video_path, segments, audio_paths, out_path):
+        return None
+    return "\n".join(seg["text"] for seg in segments)
+
+
+async def _finish(asset: dict, script: str, out_path: Path, duration: float | None) -> dict:
+    from app.media.storage_service import upload_rendered_media
+
+    asset_id = asset["id"]
+    path = upload_rendered_media(
+        asset["course_id"], asset_id, out_path.read_bytes(), "video/mp4", "mp4"
+    )
+    if not path:
+        _mark(asset_id, narration_status="failed", narration_script=script)
+        return {"asset_id": asset_id, "status": "failed", "reason": "upload failed"}
+
+    _mark(
+        asset_id,
+        narration_status="ready",
+        narration_script=script,
+        has_audio=True,
+        storage_path=path,
+        duration_seconds=probe_duration(out_path) or duration,
+    )
+    logger.info("Narration ready  asset=%s  words=%d", asset_id, len(script.split()))
+    return {"asset_id": asset_id, "status": "ready", "words": len(script.split())}

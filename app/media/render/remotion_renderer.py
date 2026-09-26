@@ -179,6 +179,7 @@ def _render_spec(spec: RemotionSpec) -> RenderResult | str:
             media_type="video/mp4",
             extension="mp4",
             duration_seconds=spec.duration_seconds,
+            beats=spec.beats(),
             # The spec, not code — this is what a lecturer reviews and what
             # reproduces the render.
             scene_code=spec.model_dump_json(indent=2),

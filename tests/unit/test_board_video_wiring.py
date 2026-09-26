@@ -50,10 +50,27 @@ class TestVideoDirective:
 
 
 class TestDirectiveScoping:
-    def test_no_video_directive_without_the_board(self):
-        """A plain text or video answer has nowhere to put a video slide."""
-        _, user = build(board=False, video_concepts=["chain-rule"])
+    def test_no_video_directive_for_a_spoken_avatar_answer(self):
+        """An avatar answer is audio; it cannot show a video mid-sentence."""
+        _, user = build(board=False, concise=True, video_concepts=["chain-rule"])
         assert "::: video" not in user
+
+    def test_plain_learn_text_is_offered_the_videos_too(self):
+        """With the Lesson Board off, lecturer videos must still reach Learn —
+        that flag being off is why they never appeared for the client."""
+        _, user = build(board=False, video_concepts=["chain-rule"])
+        assert "::: video" in user
+        assert "chain-rule" in user
+        assert "::: slide" not in user
+
+    def test_review_is_never_offered_videos(self):
+        _, user = build(board=False, mode="review", video_concepts=["chain-rule"])
+        assert "::: video" not in user
+
+    def test_the_description_is_listed_beside_the_key(self):
+        """A bare key gives the model nothing to match the question against."""
+        _, user = build(video_concepts=[("nl-intro", "Number line — placing integers")])
+        assert "- nl-intro: Number line — placing integers" in user
 
     def test_the_video_block_rides_the_dynamic_user_text(self):
         """It must NOT land in the cached system prefix — the available videos
@@ -139,3 +156,33 @@ class TestApprovedKeyLookup:
             service, "get_supabase", lambda: type("S", (), {"table": lambda s, n: FakeQuery()})()
         )
         assert service.approved_concept_keys("c") == ["chain-rule", "limits"]
+
+    def test_concepts_carry_topic_and_script_opening(self, monkeypatch):
+        from app.media.render import service
+
+        class FakeQuery:
+            def select(self, *_a, **_k):
+                return self
+
+            def eq(self, *_a):
+                return self
+
+            @property
+            def not_(self):
+                return self
+
+            def is_(self, *_a):
+                return self
+
+            def execute(self):
+                return type("R", (), {"data": [
+                    {"concept_key": "nl", "topic": "Number line",
+                     "source_script": "Show   integers\n placed on a line."},
+                ]})()
+
+        monkeypatch.setattr(
+            service, "get_supabase", lambda: type("S", (), {"table": lambda s, n: FakeQuery()})()
+        )
+        assert service.approved_concepts("c") == [
+            ("nl", "Number line — Show integers placed on a line.")
+        ]

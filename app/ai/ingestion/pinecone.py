@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import uuid
 from typing import Any, Dict, List, Sequence
 
 from pinecone import Pinecone
@@ -116,31 +115,6 @@ def upsert_chunks(
         index.upsert(vectors=batch, namespace=namespace)
 
     logger.info("Upserted %d vectors into namespace %s", len(ids), namespace)
-    return ids
-
-
-def upsert_vectors(embeddings, chunks, namespace):
-    """Legacy upsert for the old ``{text, mode, topic}`` chunk shape."""
-    index = _get_index()
-    ids = []
-    vectors = []
-
-    for emb, chunk in zip(embeddings, chunks):
-        pid = str(uuid.uuid4())
-        ids.append(pid)
-        vectors.append((
-            pid,
-            _normalize_embedding(emb),
-            {
-                "mode": chunk["mode"],
-                "topic": chunk.get("topic") or "",
-                "text": chunk.get("text", ""),
-            },
-        ))
-
-    for batch in _chunk_list(vectors, 100):
-        index.upsert(vectors=batch, namespace=namespace)
-
     return ids
 
 

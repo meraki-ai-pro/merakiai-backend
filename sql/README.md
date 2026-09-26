@@ -29,6 +29,8 @@ set is safe.
 | 013 | roster_import_narration_and_upload_tags | `enrolment_invitations`, `documents.question_formats`, narration/revision columns on `media_assets`, `courses.subject` |
 | 014 | lecturer_voices | `lecturer_voices`, `courses.lecturer_voice_id` |
 | 015 | pptx knowledge uploads | `storage.buckets.allowed_mime_types` for `course-documents` |
+| 016 | UDL round | `sessions.title`, `users.deleted_at`, exam columns on `assessments*`, `assessment_starts`, `enrolments.extra_time_percent`, `media_assets.beats` |
+| 017 | targeted_assessments | `assessments.target_student_ids` (Intervention Studio: papers for chosen students) |
 
 ## Dependencies worth knowing
 
@@ -49,6 +51,10 @@ columns to `documents` and `media_assets`.
 
 **014 after 003 and 004.** Its policies call `is_admin()` and its trigger uses
 `touch_updated_at()`.
+
+**016 after 004, 008 and 010.** It alters `enrolments`, `media_assets` and the assessment tables.
+
+**017 after 010.** One nullable column on `assessments`; NULL keeps every existing paper course-wide.
 
 **003 redefines `is_admin()` deliberately.** It is referenced by roughly thirty
 RLS policies. If the existing definition happened to be `role <> 'user'` rather

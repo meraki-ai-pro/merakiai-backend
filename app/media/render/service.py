@@ -236,6 +236,11 @@ async def execute_render(asset_id: str) -> dict:
         completed_at="now()",
     )
 
+    if result.beats:
+        # Optional: without sql/016 the video is still fine, only narration
+        # falls back to a single unaligned track.
+        _mark_optional(asset_id, beats=result.beats)
+
     narration_queued = _queue_narration(asset_id)
 
     # Deliberately not "available to students" — it is awaiting review.
@@ -286,18 +291,22 @@ def _queue_narration(asset_id: str) -> bool:
     return True
 
 
-def approved_concept_keys(course_id: str) -> list[str]:
-    """Concepts with an approved, rendered video on this course.
+def approved_concepts(course_id: str) -> list[tuple[str, str]]:
+    """``(concept_key, description)`` for each approved, rendered video.
 
-    Fed into the board prompt so the model can only reference videos that
-    exist. Failures return an empty list rather than raising: a missing video
-    list must degrade to a normal Lesson Board answer, never fail the turn.
+    Fed into the Learn prompt so the model can only reference videos that
+    exist, and can tell WHICH video fits the question. A bare key such as
+    ``nl-intro`` gives it nothing to match "what is a number line?" against;
+    the lecturer's topic and the opening of their script do.
+
+    Failures return an empty list rather than raising: a missing video list
+    must degrade to a normal answer, never fail the turn.
     """
     try:
         rows = (
             get_supabase()
             .table("media_assets")
-            .select("concept_key")
+            .select("concept_key, topic, source_script, approved_at")
             .eq("course_id", course_id)
             .eq("status", "ready")
             .not_.is_("approved_at", "null")
@@ -309,7 +318,20 @@ def approved_concept_keys(course_id: str) -> list[str]:
         logger.warning("Could not list approved videos for %s: %s", course_id, exc)
         return []
 
-    return sorted({r["concept_key"] for r in rows if r.get("concept_key")})
+    described: dict[str, str] = {}
+    for row in rows:
+        key = row.get("concept_key")
+        if not key or described.get(key):
+            continue
+        script = " ".join((row.get("source_script") or "").split())
+        parts = [row.get("topic") or "", script[:160] + ("…" if len(script) > 160 else "")]
+        described[key] = " — ".join(p for p in parts if p)
+    return sorted(described.items())
+
+
+def approved_concept_keys(course_id: str) -> list[str]:
+    """Concept keys with an approved, rendered video on this course."""
+    return [key for key, _ in approved_concepts(course_id)]
 
 
 _PLAYABLE_COLUMNS = "id, concept_key, storage_path, duration_seconds, archetype, renderer"

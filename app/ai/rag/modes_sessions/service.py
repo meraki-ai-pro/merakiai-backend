@@ -1,10 +1,12 @@
 # app/ai/rag/modes_sessions/service.py
+import asyncio
 import json
 import re
 from typing import Any, Dict, List, Tuple, Optional, Callable, Awaitable
 
 from app.ai.rag.claude import generate_response
 from app.ai.rag.retriever import retrieve_context
+from app.core import mastery
 
 # The session_type an Assessment (application) session carries now that the
 # scenario-topic picker is gone. It is a placeholder, not a topic: nothing
@@ -122,13 +124,19 @@ Return ONLY raw JSON (no markdown, no fences) in this exact schema:
   "feedback": "<clear concise feedback>",
   "missing_points": ["..."],
   "unsupported_claims": ["..."],
-  "correct_answer": "<optional — include if MCQ or fill_blank>"
+  "correct_answer": "<optional — include if MCQ or fill_blank>",
+  "misconception": "<the wrong belief behind the answer, or empty>"
 }
 
 Rules:
 - Grade ONLY using the REFERENCE MATERIAL in the user message.
 - List claims not in the reference under unsupported_claims.
-- For MCQ: student_answer may be A/B/C/D; infer correctness from the reference.""".strip()
+- For MCQ: student_answer may be A/B/C/D; infer correctness from the reference.
+- "misconception": only when the answer is not correct AND reveals a specific
+  wrong belief (not a blank, a guess, or an arithmetic slip). Name the error
+  itself in at most 10 words, e.g. "multiplies exponents instead of adding
+  them". If KNOWN MISCONCEPTIONS are listed in the user message and one is the
+  same error, copy it exactly. Otherwise "".""".strip()
 
 _SYS_APP_GEN = """You are an expert educational content creator generating structured APPLICATION scenarios.
 
@@ -426,6 +434,19 @@ def _already_asked_block(asked: List[Dict[str, Any]]) -> str:
     )
 
 
+def _topic_block(topics: List[str]) -> str:
+    """Make the generator label questions with the lecturer's own topic names."""
+    if not topics:
+        return ""
+    listed = "\n".join(f"- {t}" for t in topics[:60])
+    return (
+        "\n\nCOURSE TOPICS (the lecturer's names):\n"
+        f"{listed}\n"
+        'Set "category" to the ONE topic above that this question tests, spelled '
+        'exactly as listed. If none fits, set "category" to "".'
+    )
+
+
 async def generate_review_item(
     session_type: str,
     difficulty: str,
@@ -467,11 +488,13 @@ async def generate_review_item(
     )
 
     ref = "\n".join(contexts)
+    topics = await asyncio.to_thread(mastery.course_topics, course_id)
     user_ctx = (
         f"Course: {course_name}\n"
         f"Difficulty: {difficulty}{diff_note}\n\n"
         f"REFERENCE MATERIAL:\n{ref}"
         + _already_asked_block(asked)
+        + _topic_block(topics)
     )
     _retry_suffix = "\n\nIMPORTANT: Output ONLY complete raw JSON. No markdown. Must be COMPLETE."
 
@@ -485,6 +508,9 @@ async def generate_review_item(
         key = _ID_KEY.get(session_type, "question_id")
         prefix = _ID_PREFIX.get(session_type, "REV")
         item[key] = f"{prefix}-{len(asked) + 1:04d}"
+        # The mastery topic this answer will count towards, fixed now so the
+        # marking turn needs no second lookup. "" = counts towards nothing.
+        item["topic"] = mastery.match_topic(item.get("category") or "", topics)
         return item
 
     if session_type == "mcq":
@@ -546,13 +572,32 @@ async def generate_review_item(
     return _finish(item), contexts
 
 
+def _known_misconceptions_block(labels: Optional[List[str]]) -> str:
+    """Offer the labels already recorded for this topic, so the same error
+    seen in ten students is named once — the radar counts by exact label."""
+    if not labels:
+        return ""
+    listed = "\n".join(f"- {label}" for label in labels[:40])
+    return f"\n\nKNOWN MISCONCEPTIONS (reuse the exact wording if one fits):\n{listed}"
+
+
+def misconception_label(result: Dict[str, Any]) -> str:
+    """The grader's misconception, cleaned; "" for a correct answer or none."""
+    if result.get("verdict") == "correct":
+        return ""
+    label = " ".join(str(result.get("misconception") or "").split()).strip(" .")
+    return label[:120]
+
+
 async def evaluate_review_answer(
     item: Dict[str, Any],
     student_answer: str,
     contexts: List[str],
     course_name: str,
+    known_misconceptions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     reference = "\n\n".join(contexts)
+    known = _known_misconceptions_block(known_misconceptions)
     itype = item.get("type")
 
     if itype == "mcq":
@@ -593,6 +638,7 @@ async def evaluate_review_answer(
             f"Explanation: {explanation}\n\n"
             f"Student Answer:\n{student_answer}\n\n"
             f"REFERENCE MATERIAL:\n{reference}"
+            + known
         )
         if binary_correct is not None:
             user_msg += (
@@ -626,6 +672,7 @@ async def evaluate_review_answer(
         f"Student Answer:\n{student_answer}\n\n"
         f"Expected points (if provided):\n{json.dumps(expected_points)}\n\n"
         f"REFERENCE MATERIAL:\n{reference}"
+        + known
     )
     raw = await generate_response(
         prompt=user_msg, mode="review", system_parts=_make_system(_SYS_REVIEW_EVAL)

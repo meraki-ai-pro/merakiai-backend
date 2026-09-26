@@ -511,6 +511,3 @@ def iter_omml(parent) -> List:
     return parent.findall(f".//{_m('oMath')}")
 
 
-def paragraph_has_math(paragraph) -> bool:
-    """True when a ``python-docx`` paragraph contains at least one equation."""
-    return bool(iter_omml(paragraph._p))

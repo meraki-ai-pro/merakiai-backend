@@ -327,6 +327,41 @@ def review_asset(asset_id: str, payload: ReviewPayload, user=Depends(lecturer_gu
     }
 
 
+@router.delete("/{asset_id}")
+def delete_asset(asset_id: str, user=Depends(lecturer_guard)):
+    """Remove a video: the row, and the file behind it.
+
+    Deleting a live video takes it away from students on their next answer —
+    approved_concept_keys and playable_asset both read these rows. Deleting one
+    still rendering is allowed too, so a lecturer can clear a job that is stuck;
+    the worker's later status write then updates nothing.
+    """
+    from app.media.render.service import RENDERED_MEDIA_BUCKET
+
+    sb = get_supabase()
+    rows = (
+        sb.table("media_assets")
+        .select("id, course_id, storage_path, concept_key")
+        .eq("id", asset_id)
+        .execute()
+        .data
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    asset = rows[0]
+    assert_course_owner(user, asset["course_id"])
+
+    sb.table("media_assets").delete().eq("id", asset_id).execute()
+
+    if asset.get("storage_path"):
+        try:
+            sb.storage.from_(RENDERED_MEDIA_BUCKET).remove([asset["storage_path"]])
+        except Exception as exc:  # noqa: BLE001 — the row is gone; an orphan file is harmless
+            logger.warning("Could not remove file for deleted asset %s: %s", asset_id, exc)
+
+    return {"status": "ok", "asset_id": asset_id}
+
+
 @router.get("/concept/{course_id}/{concept_key}")
 def get_playable(course_id: str, concept_key: str, user=Depends(auth_guard)):
     """Student-facing: the approved video for a concept, if there is one.

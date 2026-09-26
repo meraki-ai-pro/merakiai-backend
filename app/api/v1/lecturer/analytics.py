@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import assert_course_owner, lecturer_guard
 from app.db.supabase import get_supabase
@@ -343,6 +343,181 @@ def mastery_breakdown(course_id: str, user=Depends(lecturer_guard)):
     students.sort(key=lambda s: s["mean"])
 
     return {"measured": True, "topics": topics, "students": students}
+
+
+@router.get("/attention")
+def students_needing_attention(course_id: str, user=Depends(lecturer_guard)):
+    """Students in a situation the lecturer should act on, each with its reason.
+
+    The rules live in app/core/attention.py. Each source degrades on its own:
+    without the events stream the list still shows disengaged and stuck
+    students, just not declining or dependent ones.
+    """
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(days=60)).isoformat()
+
+    enrolled = [
+        e["student_id"] for e in _safe(
+            lambda: sb.table("enrolments").select("student_id")
+            .eq("course_id", course_id).eq("status", "active").execute().data or [],
+            [],
+        )
+    ]
+    if not enrolled:
+        return {"students": []}
+
+    sessions = _safe(
+        lambda: sb.table("sessions").select("user_id, started_at")
+        .eq("course_id", course_id).limit(20000).execute().data or [],
+        [],
+    )
+    mastery_events = _safe(
+        lambda: sb.table("events").select("user_id, topic, payload, created_at")
+        .eq("course_id", course_id).eq("event_type", "mastery.updated")
+        .gte("created_at", since).limit(20000).execute().data or [],
+        [],
+    )
+    turn_events = _safe(
+        # Only turns that carried a help rung — every Learn turn otherwise.
+        lambda: sb.table("events").select("user_id, payload")
+        .eq("course_id", course_id).eq("event_type", "turn.completed")
+        .gte("created_at", (now - timedelta(days=30)).isoformat())
+        .not_.is_("payload->>help_level", "null")
+        .limit(20000).execute().data or [],
+        [],
+    )
+    mastery_rows = _safe(
+        lambda: sb.table("mastery_states")
+        .select("student_id, topic, mastery_score, attempts_count")
+        .eq("course_id", course_id).limit(20000).execute().data or [],
+        [],
+    )
+
+    from app.core.attention import KINDS, flags_for_course
+
+    flagged = flags_for_course(
+        now=now, enrolled=enrolled, sessions=sessions,
+        mastery_events=mastery_events, turn_events=turn_events,
+        mastery_rows=mastery_rows,
+    )
+    people = _people(sb, list(flagged))
+    students = [{**people[sid], "flags": flags} for sid, flags in flagged.items()]
+    # Most urgent situation first, then most situations.
+    students.sort(key=lambda s: (KINDS.index(s["flags"][0]["kind"]), -len(s["flags"])))
+    return {"students": students}
+
+
+def _people(sb, student_ids: list[str]) -> dict[str, dict]:
+    """``{id: {student_id, name, email}}`` for display; unknown ids still get a row."""
+    found = _safe(
+        lambda: sb.table("users").select("id, first_name, last_name, email")
+        .in_("id", student_ids).execute().data or [],
+        [],
+    ) if student_ids else []
+    by_id = {p["id"]: p for p in found}
+    out = {}
+    for sid in student_ids:
+        p = by_id.get(sid, {})
+        name = " ".join(x for x in (p.get("first_name"), p.get("last_name")) if x).strip()
+        out[sid] = {"student_id": sid, "name": name or None, "email": p.get("email")}
+    return out
+
+
+@router.get("/tutor-activity")
+def tutor_activity(course_id: str, days: int = 7, user=Depends(lecturer_guard)):
+    """What the AI tutor did for this class, and the patterns worth questioning."""
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+    days = max(1, min(days, 90))
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    turns = _safe(
+        lambda: sb.table("events").select("user_id, session_id, payload, created_at")
+        .eq("course_id", course_id).eq("event_type", "turn.completed")
+        .gte("created_at", since).not_.is_("payload->>help_level", "null")
+        .limit(50000).execute().data or [],
+        [],
+    )
+    detected = _safe(
+        lambda: sb.table("events").select("id", count="exact")
+        .eq("course_id", course_id).eq("event_type", "misconception.detected")
+        .gte("created_at", since).limit(0).execute().count or 0,
+        0,
+    )
+
+    from app.core.tutor_insights import tutor_activity as summarise
+
+    result = summarise(turns)
+    people = _people(sb, [r["student_id"] for r in result["frequent_requesters"]])
+    result["frequent_requesters"] = [
+        {**people[r["student_id"]], "requests": r["requests"]}
+        for r in result["frequent_requesters"]
+    ]
+    result["counts"]["misconceptions_detected"] = detected
+    return {"days": days, **result}
+
+
+@router.get("/misconceptions")
+def misconceptions(course_id: str, days: int = 30, user=Depends(lecturer_guard)):
+    """Wrong beliefs shared by several students, most widespread first."""
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+    days = max(1, min(days, 180))
+    now = datetime.now(timezone.utc)
+
+    rows = _safe(
+        lambda: sb.table("events").select("user_id, topic, payload, created_at")
+        .eq("course_id", course_id).eq("event_type", "misconception.detected")
+        .gte("created_at", (now - timedelta(days=days)).isoformat())
+        .limit(20000).execute().data or [],
+        [],
+    )
+
+    from app.core.tutor_insights import misconception_radar
+
+    radar = misconception_radar(rows, now)
+    people = _people(sb, sorted({s for m in radar["misconceptions"] for s in m["student_ids"]}))
+    for m in radar["misconceptions"]:
+        m["students_list"] = [people[s] for s in m.pop("student_ids")]
+    return {"days": days, **radar}
+
+
+@router.get("/students/{student_id}/timeline")
+def student_timeline(course_id: str, student_id: str, user=Depends(lecturer_guard)):
+    """One student's significant moments in this course, oldest first."""
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+
+    # 404, not 403, and not an empty timeline: a lecturer must not be able to
+    # confirm that an arbitrary user id exists by probing it here.
+    enrolled = _safe(
+        lambda: sb.table("enrolments").select("student_id")
+        .eq("course_id", course_id).eq("student_id", student_id).limit(1).execute().data or [],
+        [],
+    )
+    if not enrolled:
+        raise HTTPException(status_code=404, detail="Student not found in this course")
+
+    rows = _safe(
+        lambda: sb.table("events")
+        .select("event_type, topic, session_id, payload, created_at")
+        .eq("course_id", course_id).eq("user_id", student_id)
+        .in_("event_type", ["mastery.updated", "misconception.detected",
+                            "turn.completed", "assessment.submitted"])
+        .order("created_at", desc=True).limit(5000).execute().data or [],
+        [],
+    )
+
+    from app.core.mastery import for_student
+    from app.core.tutor_insights import student_timeline as build
+
+    return {
+        "student": _people(sb, [student_id])[student_id],
+        "mastery": for_student(student_id, course_id),
+        "timeline": build(rows),
+    }
 
 
 @router.get("/knowledge-usage")

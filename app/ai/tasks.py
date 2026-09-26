@@ -21,7 +21,7 @@ from app.ai.rag.service import query_rag
 from app.media.video_service import maybe_generate_video
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET, upload_student_image
 from app.db.supabase import get_supabase, reset_async_supabase
-from app.core import analytics, events
+from app.core import analytics, events, mastery
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +179,46 @@ async def _retain_attachments(
     return stored or None
 
 
+def _known_misconceptions(course_id: str, topic: str | None) -> list[str]:
+    """Misconception labels already recorded for this topic, most recent first.
+
+    Shown to the grader so it reuses a label rather than paraphrasing it; the
+    radar can only count what is spelled the same.
+    """
+    try:
+        query = (
+            get_supabase().table("events").select("payload")
+            .eq("course_id", course_id).eq("event_type", events.MISCONCEPTION_DETECTED)
+        )
+        query = query.eq("topic", topic) if topic else query.is_("topic", "null")
+        rows = query.order("created_at", desc=True).limit(200).execute().data or []
+    except Exception as exc:  # noqa: BLE001 — the grader just names it fresh
+        logger.warning("Known misconceptions unavailable: %s", exc)
+        return []
+    seen: dict[str, str] = {}
+    for row in rows:
+        label = ((row.get("payload") or {}).get("label") or "").strip()
+        if label:
+            seen.setdefault(label.casefold(), label)
+    return list(seen.values())[:40]
+
+
+def _previous_help_level(session_id: str, user_id: str) -> int | None:
+    """The help-ladder rung of this session's last answer, if it had one."""
+    try:
+        rows = (
+            get_supabase().table("events").select("payload")
+            .eq("user_id", user_id).eq("session_id", session_id)
+            .eq("event_type", events.TURN_COMPLETED)
+            .order("created_at", desc=True).limit(1).execute().data
+        )
+    except Exception as exc:  # noqa: BLE001 — the ladder just restarts
+        logger.warning("Help-ladder state unavailable: %s", exc)
+        return None
+    level = (rows[0].get("payload") or {}).get("help_level") if rows else None
+    return level if isinstance(level, int) and 0 <= level <= 5 else None
+
+
 async def _do_rag_turn(
     session_id: str,
     user_id: str,
@@ -189,7 +229,11 @@ async def _do_rag_turn(
 ):
     total_start = time.monotonic()
 
-    memory, course = await asyncio.gather(load_memory(session_id), _load_course(session_id))
+    memory, course, previous_help = await asyncio.gather(
+        load_memory(session_id),
+        _load_course(session_id),
+        asyncio.to_thread(_previous_help_level, session_id, user_id),
+    )
 
     if prefers_video is not None and mode != "review":
         response_format = "video" if prefers_video else "text"
@@ -246,6 +290,7 @@ async def _do_rag_turn(
             # Progressive scaffolding — a doctoral course should not be
             # taught like a first-year one (Proposal §2.2).
             academic_level=course.get("academic_level"),
+            previous_help=previous_help,
         )
     except Exception as e:
         error_result = {"error": str(e), "status": "failed"}
@@ -317,6 +362,11 @@ async def _do_rag_turn(
             "video_ms": video_ms,
             "sources": len(result.get("sources") or []),
             "had_images": bool(images),
+            # The help ladder: which rung this answer used, and whether a full
+            # solution was asked for. Read back by the next turn and by the
+            # lecturer's attention list.
+            "help_level": result.get("help_level"),
+            "help_asked": result.get("help_asked", False),
         },
     )
 
@@ -327,6 +377,8 @@ async def _do_rag_turn(
         # Repeated on the terminal push so a client that reconnected mid-turn,
         # or missed the earlier `sources` event, can still render citations.
         "sources": result.get("sources", []),
+        # Drives the "next hint / full solution" buttons under a hint.
+        "help_level": result.get("help_level"),
         **delivery,
     }
     _publish_to_ws(session_id, final_result)
@@ -647,6 +699,7 @@ async def _do_mode_session_turn(
         evaluate_application_answer,
         format_application_prompt,
         asked_summary,
+        misconception_label,
     )
 
     supabase = get_supabase()
@@ -801,16 +854,39 @@ async def _do_mode_session_turn(
     # REVIEW                                                               #
     # ------------------------------------------------------------------ #
     _publish_status(session_id, "evaluating", "Evaluating your answer")
+    review_topic = pending_payload.get("topic") or None
     eval_out = await evaluate_review_answer(
         item=pending_payload,
         student_answer=student_answer,
         contexts=contexts,
         course_name=course_name,
+        known_misconceptions=await asyncio.to_thread(
+            _known_misconceptions, course_id, review_topic
+        ),
     )
     ai_ms = int((time.monotonic() - ai_start) * 1000)
 
+    # Feeds the lecturer's misconception radar and the student's timeline.
+    label = misconception_label(eval_out)
+    if label:
+        events.emit(
+            events.MISCONCEPTION_DETECTED,
+            user_id=user_id, course_id=course_id, topic=review_topic,
+            session_id=session_id,
+            payload={"label": label, "verdict": eval_out.get("verdict")},
+        )
+
     score = float(eval_out.get("score", 0.0))
     next_difficulty = adjust_difficulty(difficulty, score)
+
+    # Review is unaided practice, the most frequent evidence a student gives,
+    # so it counts towards mastery alongside exams. "partial" is not mastery.
+    if pending_payload.get("topic"):
+        await asyncio.to_thread(
+            mastery.record_attempt,
+            student_id=user_id, course_id=course_id, topic=pending_payload["topic"],
+            correct=eval_out.get("verdict") == "correct", source="review",
+        )
 
     feedback_text = (
         f"Verdict: {eval_out['verdict']}\n"

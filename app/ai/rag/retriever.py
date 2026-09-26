@@ -173,23 +173,6 @@ def _normalize_embedding(embedding):
     return [float(v) for v in embedding]
 
 
-async def _get_cached_embedding(text: str):
-    supabase = await get_async_supabase()
-    text_hash = _hash_text(text)
-    try:
-        res = await (
-            supabase.table("embedding_cache")
-            .select("embedding")
-            .eq("text_hash", text_hash)
-            .execute()
-        )
-        if res.data:
-            return res.data[0]["embedding"]
-    except Exception as e:
-        logger.error(f"Failed to fetch from embedding cache: {e}")
-    return None
-
-
 async def _store_embedding(text: str, embedding):
     supabase = await get_async_supabase()
     text_hash = _hash_text(text)

@@ -8,7 +8,7 @@ import {
   useVideoConfig,
 } from 'remotion';
 import type { ChartSpec, LessonSpec, Slide, Step } from './types';
-import { FPS, STEP_SECONDS } from './types';
+import { CHART_SECONDS, FPS, STEP_SECONDS, TAIL_SECONDS, TITLE_SECONDS } from './types';
 
 /**
  * One composition renders every archetype.
@@ -374,7 +374,12 @@ const Chart: React.FC<{ chart: ChartSpec; accent: string; startFrame: number }> 
 };
 
 export const Lesson: React.FC<{ spec: LessonSpec }> = ({ spec }) => {
-  const titleFrames = Math.round(2.5 * FPS);
+  // Every section length comes from the constants Root.tsx sizes the
+  // composition with. These were literals (2.5s title, 3s per step, 6s chart)
+  // while the composition used 3 / 4.5 / 8: steps were cut off after 3s each,
+  // later steps never appeared at all, and the video ended on seconds of empty
+  // background — narration sized to the full length then talked over nothing.
+  const titleFrames = Math.round(TITLE_SECONDS * FPS);
   let cursor = titleFrames;
 
   const sections: React.ReactNode[] = [
@@ -394,7 +399,7 @@ export const Lesson: React.FC<{ spec: LessonSpec }> = ({ spec }) => {
   }
 
   if (spec.steps.length > 0) {
-    const length = spec.steps.length * 3 * FPS;
+    const length = Math.round(spec.steps.length * STEP_SECONDS * FPS);
     sections.push(
       <Sequence key="steps" from={cursor} durationInFrames={length}>
         <StepsScene steps={spec.steps} accent={spec.accent} startFrame={0} />
@@ -404,7 +409,7 @@ export const Lesson: React.FC<{ spec: LessonSpec }> = ({ spec }) => {
   }
 
   if (spec.chart) {
-    const length = Math.round(6 * FPS);
+    const length = Math.round(CHART_SECONDS * FPS);
     sections.push(
       <Sequence key="chart" from={cursor} durationInFrames={length}>
         <Chart chart={spec.chart} accent={spec.accent} startFrame={0} />

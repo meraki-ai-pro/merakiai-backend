@@ -12,12 +12,12 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from app.api.v1.lecturer import analytics, courses, knowledge, students
+from app.api.v1.lecturer import analytics, courses, interventions, knowledge, students
 from app.api.v1.lecturer.courses import _COURSE_ID_RE, CourseCreate, create_course
 
 BACKEND = Path(__file__).resolve().parents[2]
 
-MODULES = (courses, knowledge, students, analytics)
+MODULES = (courses, knowledge, students, analytics, interventions)
 
 
 def _route_handlers(module):

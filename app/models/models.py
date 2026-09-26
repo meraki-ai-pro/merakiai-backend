@@ -65,12 +65,6 @@ class AvatarSelectRequest(BaseModel):
     avatar_id: str = Field(..., max_length=100)
 
 
-class TextTurnRequest(BaseModel):
-    session_id: str = Field(..., max_length=100)
-    message: str = Field(..., min_length=1, max_length=10_000)
-    response_format: str | None = Field(None, max_length=50)
-
-
 class SessionModeUpdate(BaseModel):
     current_mode: str = Field(..., max_length=50)  # learn|application|review
 

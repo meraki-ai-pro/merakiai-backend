@@ -37,6 +37,11 @@ class RenderResult:
     scene_code: str | None = None
     # Optional captions track. Proposal §6.2 requires every video to carry them.
     captions: str | None = None
+    # What is on screen when: [{"start", "end", "label"}], contiguous from 0 to
+    # the end of the video. Narration is written and placed per beat, which is
+    # what keeps the voice on the step the student is looking at. None means
+    # the renderer could not tell, and narration falls back to one track.
+    beats: list[dict] | None = None
 
 
 class Renderer(Protocol):

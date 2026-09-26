@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.core import audit
 from app.core.auth import admin_guard, require_mfa_if_enrolled
 from app.db.supabase import get_supabase
 
@@ -14,6 +16,9 @@ from app.db.supabase import get_supabase
 _POSTGREST_METACHAR_RE = re.compile(r"[,.()\[\]{}]")
 
 router = APIRouter(prefix="/users", tags=["Admin – Users"])
+
+# Supabase Auth has no "ban forever"; a century is the conventional stand-in.
+_BAN_FOREVER = "876000h"
 
 # Ordering is for display and coarse comparison only. 'lecturer' is not
 # "more than a student" in an authority sense — it is a different capability
@@ -42,28 +47,36 @@ def list_users(
     page_size: int = Query(20, ge=1, le=100),
     role: str | None = None,
     search: str | None = None,
+    include_deleted: bool = False,
     _user=Depends(admin_guard),
 ):
     sb = get_supabase()
     offset = (page - 1) * page_size
 
-    q = sb.table("users").select(
-        "id, email, role, first_name, last_name, university_name, country, created_at",
-        count="exact",
-    )
-    if role:
-        q = q.eq("role", role)
-    if search:
-        # H-5: strip PostgREST metacharacters and cap length before interpolating
-        # into the filter string to prevent filter-tree injection.
-        safe_search = _POSTGREST_METACHAR_RE.sub("", search)[:100]
-        q = q.or_(
-            f"email.ilike.%{safe_search}%,"
-            f"first_name.ilike.%{safe_search}%,"
-            f"last_name.ilike.%{safe_search}%"
-        )
+    def _query(columns: str, filter_deleted: bool):
+        q = sb.table("users").select(columns, count="exact")
+        if role:
+            q = q.eq("role", role)
+        if filter_deleted:
+            q = q.is_("deleted_at", "null")
+        if search:
+            # H-5: strip PostgREST metacharacters and cap length before interpolating
+            # into the filter string to prevent filter-tree injection.
+            safe_search = _POSTGREST_METACHAR_RE.sub("", search)[:100]
+            q = q.or_(
+                f"email.ilike.%{safe_search}%,"
+                f"first_name.ilike.%{safe_search}%,"
+                f"last_name.ilike.%{safe_search}%"
+            )
+        return q.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
 
-    res = q.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+    columns = "id, email, role, first_name, last_name, university_name, country, created_at"
+    try:
+        res = _query(columns + ", deleted_at", filter_deleted=not include_deleted)
+    except Exception:
+        # sql/016 not applied: nobody can have been soft-deleted yet.
+        res = _query(columns, filter_deleted=False)
+
     return {
         "users": res.data or [],
         "total": res.count or 0,
@@ -147,18 +160,80 @@ def update_user_role(
     return {"status": "ok", "user_id": user_id, "new_role": new_role}
 
 
+def _load_target(sb, user_id: str) -> dict:
+    rows = sb.table("users").select("id, role, email, deleted_at").eq("id", user_id).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="User not found")
+    return rows[0]
+
+
 @router.delete("/{user_id}")
-def delete_user(
+def soft_delete_user(
     user_id: str,
+    request: Request,
     user=Depends(admin_guard),
     _mfa=Depends(require_mfa_if_enrolled),
 ):
+    """Remove an account without destroying it.
+
+    The profile, sessions, attempts and feedback all stay, so research data and
+    audit history survive and the account can be restored. What stops the
+    person is the auth ban: Supabase refuses their sign-in and token refresh,
+    so an access token already issued lapses within the hour.
+
+    This replaced a hard delete of the auth user, which cascaded through
+    public.users and took everything the account had ever produced with it.
+    """
     if user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Only super admins can delete users")
     if user_id == user["id"]:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
     sb = get_supabase()
-    # Deleting from auth.users cascades to public.users via FK
-    sb.auth.admin.delete_user(user_id)
-    return {"status": "ok", "deleted_user_id": user_id}
+    target = _load_target(sb, user_id)
+    if target["role"] == "super_admin":
+        # Otherwise two super admins can lock each other out; demote first.
+        raise HTTPException(
+            status_code=400, detail="Demote a super admin before deleting their account"
+        )
+    if target.get("deleted_at"):
+        return {"status": "ok", "user_id": user_id, "deleted_at": target["deleted_at"]}
+
+    # Ban first: if it fails, nothing has changed and the admin can retry.
+    # The reverse order would show "deleted" for someone who can still sign in.
+    sb.auth.admin.update_user_by_id(user_id, {"ban_duration": _BAN_FOREVER})
+
+    deleted_at = datetime.now(timezone.utc).isoformat()
+    sb.table("users").update({"deleted_at": deleted_at, "deleted_by": user["id"]}).eq(
+        "id", user_id
+    ).execute()
+
+    audit.record(
+        actor=user, action="user.soft_delete", resource_type="user", resource_id=user_id,
+        old_values={"email": target.get("email"), "role": target.get("role")},
+        request=request,
+    )
+    return {"status": "ok", "user_id": user_id, "deleted_at": deleted_at}
+
+
+@router.post("/{user_id}/restore")
+def restore_user(
+    user_id: str,
+    request: Request,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
+    if user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Only super admins can restore users")
+
+    sb = get_supabase()
+    _load_target(sb, user_id)
+
+    sb.auth.admin.update_user_by_id(user_id, {"ban_duration": "none"})
+    sb.table("users").update({"deleted_at": None, "deleted_by": None}).eq("id", user_id).execute()
+
+    audit.record(
+        actor=user, action="user.restore", resource_type="user", resource_id=user_id,
+        request=request,
+    )
+    return {"status": "ok", "user_id": user_id}

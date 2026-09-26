@@ -18,6 +18,12 @@ import pytest
 from app.ai.rag.modes_sessions import service
 
 
+@pytest.fixture(autouse=True)
+def _no_topic_lookup(monkeypatch):
+    """Generation reads the course's topic list; these tests are about variety."""
+    monkeypatch.setattr(service.mastery, "course_topics", lambda course_id: [])
+
+
 ITEM = {
     "type": "mcq",
     "question_id": "REV-MCQ-XXXX",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,6 +15,8 @@ from app.core.enrolment import (
 from app.db.supabase import get_supabase, get_user_client
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET, signed_url
 from app.models.models import VideoToggle, SessionModeUpdate, SessionCreateRequest, SessionTitleUpdate
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -106,14 +109,23 @@ def list_sessions(
 ):
     """Return all sessions for the authenticated user, newest first."""
     supabase = get_user_client(user["token"])
-    rows = (
-        supabase.table("sessions")
-        .select("id, current_mode, prefers_video, started_at, ended_at, course_id")
-        .eq("user_id", user["id"])
-        .order("started_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
-    )
+
+    def _rows(columns: str):
+        return (
+            supabase.table("sessions")
+            .select(columns)
+            .eq("user_id", user["id"])
+            .order("started_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+
+    base_columns = "id, current_mode, prefers_video, started_at, ended_at, course_id"
+    try:
+        rows = _rows(base_columns + ", title")
+    except Exception:
+        # sql/016 not applied: no stored titles, so every one is derived.
+        rows = _rows(base_columns)
     session_rows = rows.data or []
     session_ids = [row["id"] for row in session_rows]
     titles: dict[str, str] = {}
@@ -145,7 +157,8 @@ def list_sessions(
     sessions = []
     for row in session_rows:
         sid = row["id"]
-        title = titles.get(sid, "")
+        # A name the student chose wins over one derived from their first message.
+        title = (row.get("title") or "").strip() or titles.get(sid, "")
         sessions.append({
             "id": sid,
             "title": (title[:60] + ("…" if len(title) > 60 else "")) if title else "Session",
@@ -387,11 +400,19 @@ def rename_session(session_id: str, payload: SessionTitleUpdate, user=Depends(au
     supabase = get_user_client(user["token"])
     if not supabase.table("sessions").select("id").eq("id", sid).execute().data:
         raise HTTPException(status_code=404, detail="Session not found")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title cannot be blank")
     try:
-        supabase.table("sessions").update({"title": payload.title}).eq("id", sid).execute()
-    except Exception:
-        pass  # graceful no-op if title column hasn't been added to the schema yet
-    return {"session_id": sid, "title": payload.title}
+        supabase.table("sessions").update({"title": title}).eq("id", sid).execute()
+    except Exception as exc:
+        # This used to pass silently, so renames "succeeded" and reverted on the
+        # next refresh. Say so instead: the fix is applying sql/016.
+        logger.warning("Session rename failed for %s: %s", sid, exc)
+        raise HTTPException(
+            status_code=503, detail="Renaming sessions is not available yet."
+        ) from exc
+    return {"session_id": sid, "title": title}
 
 
 @router.post("/{session_id}/end")

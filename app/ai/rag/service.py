@@ -5,7 +5,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from app.core import events
-from . import crag
+from . import crag, help_ladder
 from .retriever import retrieve
 from .prompt_builder import build_system_and_user
 from .claude import generate_response, stream_response
@@ -63,6 +63,7 @@ async def query_rag(
     board: bool = False,
     images: Optional[List[Dict[str, str]]] = None,
     academic_level: Optional[str] = None,
+    previous_help: Optional[int] = None,
 ) -> Union[Dict[str, Any], Dict[str, str]]:
     """Full RAG pipeline for a single conversational turn.
 
@@ -181,13 +182,14 @@ async def query_rag(
             payload={"best": verdict.best_score, "usable": verdict.usable},
         )
 
-    # Only when the board is in play — a text or video answer has nowhere to
-    # put a video slide, so the lookup would be wasted work.
-    video_concepts: List[str] = []
-    if board:
-        from app.media.render.service import approved_concept_keys
+    # Every Learn answer the student reads can carry the lecturer's approved
+    # animations — board or plain text. Only a spoken avatar answer (concise)
+    # has nowhere to show one, so the lookup would be wasted work there.
+    video_concepts: list = []
+    if board or (mode == "learn" and not concise):
+        from app.media.render.service import approved_concepts
 
-        video_concepts = await asyncio.to_thread(approved_concept_keys, course_id)
+        video_concepts = await asyncio.to_thread(approved_concepts, course_id)
 
     system_text, user_text = build_system_and_user(
         user_message=user_message,
@@ -202,6 +204,7 @@ async def query_rag(
         video_concepts=video_concepts,
         academic_level=academic_level,
         insufficient_context=crag._enabled() and verdict.should_admit_failure,
+        previous_help=previous_help,
     )
 
     if on_progress is not None:
@@ -219,18 +222,26 @@ async def query_rag(
     ]
 
     if on_chunk is not None:
+        # The help tag opens the answer and must never reach the student.
+        tag_filter = help_ladder.TagFilter(on_chunk)
         raw_output = await stream_response(
             prompt=user_text, mode=mode, system_parts=system_parts,
-            on_chunk=on_chunk, images=images,
+            on_chunk=tag_filter, images=images,
         )
+        tag_filter.flush()
     else:
         raw_output = await generate_response(
             prompt=user_text, mode=mode, system_parts=system_parts, images=images,
         )
 
+    help_level, help_asked, raw_output = help_ladder.parse(raw_output)
+
     if verdict.should_admit_failure:
+        # A hint (rungs 1-4) is plain prose; a note slide would turn it into
+        # a one-slide deck.
+        is_hint = help_level is not None and 1 <= help_level <= 4
         raw_output, suffix = _ensure_failure_disclaimer(
-            raw_output, board=board, concise=concise
+            raw_output, board=board and not is_hint, concise=concise
         )
         if suffix and on_chunk is not None:
             on_chunk(suffix)
@@ -239,4 +250,7 @@ async def query_rag(
         "mode": mode,
         "response": raw_output.strip(),
         "sources": sources,
+        # None when the model sent no tag (non-Learn modes, or it forgot).
+        "help_level": help_level,
+        "help_asked": help_asked,
     }

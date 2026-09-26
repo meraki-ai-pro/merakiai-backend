@@ -54,18 +54,16 @@ MANIM_PYTHON = os.getenv("MANIM_PYTHON") or sys.executable
 
 _MAX_REPAIR_ATTEMPTS = int(os.getenv("MANIM_REPAIR_ATTEMPTS", "1"))
 
-# Playback stretch applied to the finished video, as a fraction of real time:
-# 0.85 plays it back 15% slower. The prompt above asks for humane pacing, but a
-# model reliably drifts back towards one-second animations and half-second
-# pauses — the chain-rule render shipped 26 animations with no run_time at all,
-# a visual change every 2.3 seconds. This is the deterministic half of the fix
-# and needs no cooperation from the model.
+# Playback stretch applied to the finished video, as a fraction of real time
+# (0.85 = 15% slower). Default 1.0 — OFF.
 #
-# Uniform, so nothing desynchronises: narration is generated afterwards from
-# the PROBED duration of the stretched file.
-#
-# Set MANIM_SPEED=1.0 to disable.
-MANIM_SPEED = float(os.getenv("MANIM_SPEED", "0.85"))
+# It was 0.85 when the complaint was "too fast". The next complaint was "very
+# slow and out of sync", and both have the same cure: narration is now placed
+# beat by beat and the video holds a frame wherever the voice needs longer, so
+# pacing comes from what is being SAID rather than a uniform slow-motion that
+# made every animation drag. The knob stays for a deployment that wants it;
+# beats are scaled by the same factor, so it cannot desynchronise either.
+MANIM_SPEED = float(os.getenv("MANIM_SPEED", "1.0"))
 
 
 _SCENE_SYSTEM = """You write Manim Community Edition scenes that teach one \
@@ -213,6 +211,54 @@ def _slow_down(video: Path, speed: float) -> Path:
 
     logger.info("Paced render to %.0f%% speed", speed * 100)
     return out
+
+
+def _beats_from_partials(media_dir: Path, speed: float = 1.0) -> list[dict] | None:
+    """One beat per executed ``self.play`` / ``self.wait``, timed exactly.
+
+    Manim renders each call to its own partial file and lists them, in
+    execution order, in partial_movie_file_list.txt before concatenating —
+    including every iteration of a loop, which static reading of the scene
+    code could not count. Their durations sum to the final video.
+
+    None when the list is missing or unreadable: narration then falls back to
+    a single track rather than being placed against a guessed timeline.
+    """
+    lists = list(media_dir.rglob("partial_movie_file_list.txt"))
+    if len(lists) != 1:
+        return None
+    try:
+        entries = [
+            line.strip()[len("file '"):-1]
+            for line in lists[0].read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("file '")
+        ]
+        durations = []
+        for entry in entries:
+            path = Path(entry[len("file:"):] if entry.startswith("file:") else entry)
+            seconds = probe_duration(path)
+            if not seconds:
+                return None
+            durations.append(seconds / speed)
+    except OSError:
+        return None
+    if not durations:
+        return None
+
+    beats, cursor = [], 0.0
+    for i, seconds in enumerate(durations, 1):
+        beats.append({
+            "start": round(cursor, 3),
+            "end": round(cursor + seconds, 3),
+            "label": f"call {i} (the {_ordinal(i)} self.play or self.wait executed)",
+        })
+        cursor += seconds
+    return beats
+
+
+def _ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
 
 
 def _find_output(media_dir: Path) -> Path | None:
@@ -392,6 +438,9 @@ class ManimRenderer:
             if not video:
                 return "manim reported success but produced no video file."
 
+            # Read before the workdir is removed; scaled by the same stretch.
+            beats = _beats_from_partials(workdir / "media", MANIM_SPEED)
+
             video = _slow_down(video, MANIM_SPEED)
 
             return RenderResult(
@@ -405,6 +454,7 @@ class ManimRenderer:
                 # Remotion ones did.
                 duration_seconds=probe_duration(video),
                 scene_code=source,
+                beats=beats,
             )
         finally:
             # The workdir holds generated code and intermediate frames; a

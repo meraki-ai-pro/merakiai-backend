@@ -1,3 +1,5 @@
+from app.ai.rag import help_ladder
+
 _DEFAULT_PERSONA = """
 You are an expert tutor and instructor.
 You teach as a calm, patient, and friendly lecturer.
@@ -149,12 +151,13 @@ Rules:
 - Show the mathematics. Write every formula, derivation and worked example in
   LaTeX: $...$ inline and $$...$$ for anything displayed on its own line.
   Never describe an equation in words when you can write it.
-- When you work through a problem, show every step and say what you did at each
-  one. A student should be able to reproduce your working from the answer alone.
+- When you work through an example, show every step and say what you did at
+  each one. A student should be able to reproduce your working from the answer
+  alone.
 - Build understanding progressively.
-- Do NOT quiz the student.
-- Do NOT grade the student.
-"""
+- Do NOT set the student quizzes or grade them. Asking a guiding question
+  while they work their own problem is part of the help ladder, not a quiz.
+""" + help_ladder.LADDER_INSTRUCTION
 
     elif mode == "application":
         mode_instruction = """
@@ -212,6 +215,7 @@ Rules:
 # prefix is unaffected.
 _BOARD_DIRECTIVE = r"""
 PRESENT THIS ANSWER ON THE LESSON BOARD.
+(Exception: a help-ladder hint, rungs 1 to 4, is plain prose with no slides.)
 
 Structure your whole answer as a short deck of slides using these fences:
 
@@ -247,8 +251,8 @@ plot to that slide immediately after its body, before the closing fence:
 - Only add a plot when it teaches something. Most slides do not need one.
 """
 
-# Appended to the board directive only when the course actually has approved
-# concept videos. The list is injected rather than left to the model's
+# Appended to a Learn answer's directive only when the course actually has
+# approved concept videos. The list is injected rather than left to the model's
 # judgement: a hallucinated concept key resolves to nothing and the student
 # sees a silent gap where a video was promised.
 _BOARD_VIDEO_DIRECTIVE = """
@@ -267,6 +271,29 @@ the point where watching it would help, using exactly:
   video for anything else, and inventing a key shows the student nothing.
 - At most one video per answer, and only when it is genuinely the concept being
   asked about. The slides already explain it; the video is reinforcement.
+"""
+
+# The same offer for a plain text answer (Lesson Board off). The fence is the
+# same, so the client resolves it the same way; the difference is only where it
+# goes — after the paragraph it illustrates rather than on a slide of its own.
+_TEXT_VIDEO_DIRECTIVE = """
+Your lecturer has produced and approved short animated videos for these
+concepts:
+
+{concept_list}
+
+If the student's question is about one of them, show it by putting these two
+lines on their own, straight after the paragraph where watching it would help:
+
+::: video <concept-key>
+:::
+
+- Use ONLY a key from the list above, spelled exactly as written. There is no
+  video for anything else, and inventing a key shows the student nothing.
+- At most one video per answer, and only when it is genuinely the concept being
+  asked about — match on meaning, not on the exact words the student used.
+- Mention it naturally in a sentence ("Your lecturer's animation below shows
+  this step by step."). Do not describe what is in it; the student will watch.
 """
 
 # Spoken-answer directive for video responses. D-ID Agents streaming rejects
@@ -349,9 +376,10 @@ def build_system_and_user(
     concise: bool = False,
     board: bool = False,
     sources: list | None = None,
-    video_concepts: list[str] | None = None,
+    video_concepts: list[str | tuple[str, str]] | None = None,
     academic_level: str | None = None,
     insufficient_context: bool = False,
+    previous_help: int | None = None,
 ) -> tuple[str, str]:
     """Return ``(system_text, user_text)`` for a RAG turn.
 
@@ -382,14 +410,16 @@ def build_system_and_user(
 
     reference_block = _build_reference_block(context, sources)
 
+    concept_list = _format_concepts(video_concepts or [])
     if concise:
+        # A spoken avatar answer cannot show a video mid-sentence.
         format_block = _VIDEO_BREVITY_DIRECTIVE
     elif board:
         format_block = _BOARD_DIRECTIVE
-        if video_concepts:
-            format_block += _BOARD_VIDEO_DIRECTIVE.format(
-                concept_list="\n".join(f"- {key}" for key in video_concepts)
-            )
+        if concept_list:
+            format_block += _BOARD_VIDEO_DIRECTIVE.format(concept_list=concept_list)
+    elif concept_list and mode == "learn":
+        format_block = _TEXT_VIDEO_DIRECTIVE.format(concept_list=concept_list)
     else:
         format_block = ""
 
@@ -402,33 +432,23 @@ def build_system_and_user(
 
         reference_block = f"{reference_block}\n{INSUFFICIENT_CONTEXT_DIRECTIVE}"
 
+    # Where the help ladder stands. Per turn, so it rides the user text.
+    ladder_block = help_ladder.previous_state_note(previous_help) if mode == "learn" else ""
+
     user_text = (
-        f"{memory_block}\n{reference_block}\n{format_block}\n"
+        f"{memory_block}{ladder_block}\n{reference_block}\n{format_block}\n"
         f"STUDENT QUESTION:\n{user_message}"
     ).strip()
 
     return system_text, user_text
 
 
-def build_prompt(
-    user_message: str,
-    context: list,
-    mode: str,
-    memory: list = None,
-    course_persona: str = None,
-    course_domain_topics: list = None,
-):
-    """Build a single combined prompt string (legacy/fallback path).
+def _format_concepts(concepts: list[str | tuple[str, str]]) -> str:
+    """One line per video: the key, then what it is about when known."""
+    lines = []
+    for item in concepts:
+        key, about = (item, "") if isinstance(item, str) else item
+        lines.append(f"- {key}: {about}" if about else f"- {key}")
+    return "\n".join(lines)
 
-    Prefer ``build_system_and_user`` for new call sites so the stable system
-    prefix can be cached with ``cache_control``.
-    """
-    system_text, user_text = build_system_and_user(
-        user_message=user_message,
-        context=context,
-        mode=mode,
-        memory=memory,
-        course_persona=course_persona,
-        course_domain_topics=course_domain_topics,
-    )
-    return f"{system_text}\n\n{user_text}".strip()
+

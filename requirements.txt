@@ -10,7 +10,6 @@ python-dotenv==1.2.2
 
 # ── Auth / Security ───────────────────────────────────────────────────────────
 PyJWT[crypto]==2.13.0
-fastapi-security==0.1.0
 pydantic[email]==2.13.1
 
 # ── Document parsing ──────────────────────────────────────────────────────────
@@ -21,14 +20,12 @@ python-docx==1.2.0
 # Lecture decks. Slides carry the headings and the speaker notes carry the
 # teaching, so both are ingested (app/ai/ingestion/math_parser.py).
 python-pptx==1.0.2
-unstructured==0.24.0
-beautifulsoup4==4.14.3
 lxml==6.1.2
-pandas==3.0.2
-tabulate==0.10.0
 # Roster import (app/core/roster.py). Lecturers hand out class lists as .xlsx
 # far more often than as .csv, and openpyxl is the only reader for that format.
 openpyxl==3.1.5
+# Marks typed maths answers by value (app/core/math_answers.py): "1+2x" = "2x+1".
+sympy==1.14.0
 
 # ── AI / ML providers ─────────────────────────────────────────────────────────
 openai==2.31.0
@@ -50,7 +47,6 @@ celery==5.6.3
 kombu==5.6.2
 redis==7.4.0
 websockets==15.0.1
-rabbitmq==0.2.0
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 # Kept here rather than a separate requirements-test.txt so a fresh clone can

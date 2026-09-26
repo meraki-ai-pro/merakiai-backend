@@ -49,6 +49,30 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "temperature": 0.2,
         "max_tokens": 8000,
     },
+    # Turning a lecturer's uploaded exam paper into structured questions. A
+    # 40-question paper with options and answer keys is several thousand
+    # tokens of JSON, and a truncated array loses the tail of the paper.
+    "exam_import": {
+        "model": "claude-sonnet-4-6",
+        "temperature": 0.0,
+        "max_tokens": 16000,
+    },
+    # Suggesting a mark for one short answer. Deterministic, because the same
+    # answer must not earn different marks for two students; a lecturer
+    # confirms every suggestion before results are released.
+    "exam_marking": {
+        "model": "claude-sonnet-4-6",
+        "temperature": 0.0,
+        "max_tokens": 400,
+    },
+    # Intervention Studio: suggested responses and targeted practice papers.
+    # Room for 15 questions of JSON with options; a little temperature so a
+    # second draft is not the first one again.
+    "intervention": {
+        "model": "claude-sonnet-4-6",
+        "temperature": 0.3,
+        "max_tokens": 6000,
+    },
 }
 
 
