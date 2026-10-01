@@ -18,11 +18,24 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
+# The answer transcript keeps these markers so the UI can render clickable
+# source badges.  They are presentation metadata, though, and a TTS voice
+# reading "open bracket one close bracket" interrupts the explanation.  Keep
+# this deliberately aligned with the frontend citation syntax: one or two
+# digits in square brackets, but never a Markdown link such as ``[1](url)``.
+_CITATION_RE = re.compile(r"(?:\s*\[\d{1,2}\](?!\())+")
+
+
+def strip_citations(text: str) -> str:
+    """Remove inline source markers from text that will be spoken aloud."""
+    return _CITATION_RE.sub("", text or "")
+
 def clean_for_tts(text: str) -> str:
     """Remove emojis/markdown/special chars so TTS sounds clean."""
     if not text:
         return ""
 
+    text = strip_citations(text)
     text = _EMOJI_RE.sub("", text)
 
     # Remove markdown headings and emphasis
