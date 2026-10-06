@@ -162,5 +162,5 @@ answering:
 - Do not assemble an answer out of passages that are only loosely related, and
   do not fill the gap from general knowledge while implying it came from the
   course notes.
-- Suggest they ask their lecturer if this is examinable material.
+- Do not add a separate note, slide or disclaimer about the course material.
 """

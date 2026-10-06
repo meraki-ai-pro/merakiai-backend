@@ -132,6 +132,9 @@ Rules:
 - Grade ONLY using the REFERENCE MATERIAL in the user message.
 - List claims not in the reference under unsupported_claims.
 - For MCQ: student_answer may be A/B/C/D; infer correctness from the reference.
+- Write "feedback", "missing_points" and "unsupported_claims" TO the student,
+  in the second person: "You chose option B", "You missed the boundary
+  condition". Never write "the student" or "they".
 - "misconception": only when the answer is not correct AND reveals a specific
   wrong belief (not a blank, a guess, or an arithmetic slip). Name the error
   itself in at most 10 words, e.g. "multiplies exponents instead of adding
@@ -182,6 +185,9 @@ Return ONLY raw JSON (no markdown, no fences) in this exact schema:
 Rules:
 - Grade ONLY using the REFERENCE MATERIAL in the user message.
 - Be supportive and corrective.
+- Write "feedback", "missing_points" and "unsupported_claims" TO the student,
+  in the second person: "You chose option B", "You missed the boundary
+  condition". Never write "the student" or "they".
 - List claims beyond the reference under unsupported_claims.""".strip()
 
 

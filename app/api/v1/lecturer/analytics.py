@@ -120,7 +120,14 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
         },
         "mastery": _mastery_summary(sb, course_id),
         "engagement": _engagement_summary(sb, course_id),
-        "time_on_task": _time_on_task(sessions),
+        # Enrolled students only: a lecturer testing their own course is not study time.
+        "time_on_task": _safe(
+            lambda: _time_on_task(_session_turns(
+                sb, [x["id"] for x in sessions if x["user_id"] in enrolled_ids]
+            )),
+            {"measured": False, "reason": "Study time is unavailable right now."},
+        ),
+        "activity": _daily_activity(sessions, enrolled_ids),
         # Named explicitly so the dashboard shows "not yet measured" rather
         # than a zero the lecturer would read as "no learning happened".
         # Empty now that time-on-task is derived from session timestamps —
@@ -130,60 +137,109 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
     }
 
 
-def _time_on_task(sessions: list[dict]) -> dict:
-    """Minutes actually spent studying, from session start/end timestamps.
+# Session length buckets, in minutes of active study. Upper bound exclusive.
+SESSION_LENGTH_BUCKETS = ((0, 5, "<5 min"), (5, 15, "5–15"), (15, 30, "15–30"), (30, 60, "30–60"), (60, 10**9, "60+"))
 
-    Only CLOSED sessions count. An open session has no end time, and treating
-    "now" as the end would score a student who left a tab open overnight as the
-    most engaged in the cohort — which is precisely the number a lecturer would
-    act on and be wrong about.
+# A gap between two messages longer than this is a break, not study. Credited
+# at this cap, so reading a long answer counts but a tab left open does not.
+BREAK_MINUTES = 15
 
-    The median is reported alongside the mean because the distribution is
-    heavily skewed: a handful of long sessions drag the mean well above what a
-    typical student does.
+
+def _parse_ts(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_turns(sb, session_ids: list[str]) -> dict[str, list[datetime]]:
+    """Message timestamps per session, sorted. Batched: an IN list of every
+    session id on a big course would overflow the request URL."""
+    turns: dict[str, list[datetime]] = {}
+    for i in range(0, len(session_ids), 200):
+        rows = (
+            sb.table("conversations").select("session_id, created_at")
+            .in_("session_id", session_ids[i:i + 200])
+            # Lecturer-sent lessons (Intervention Studio) are not the student studying.
+            .not_.like("user_input", "(system)%")
+            .limit(50000).execute().data or []
+        )
+        for r in rows:
+            ts = _parse_ts(r.get("created_at"))
+            if ts:
+                turns.setdefault(r["session_id"], []).append(ts)
+    return {sid: sorted(ts) for sid, ts in turns.items()}
+
+
+def _time_on_task(turns: dict[str, list[datetime]]) -> dict:
+    """Minutes actually spent studying, from the gaps between messages.
+
+    Students never close a session — nothing in the app ends one — so a
+    start/end measure covered almost no real sessions, and the end times that
+    did exist were set days later by clean-ups. Activity needs no close: each
+    gap between consecutive messages counts, capped at BREAK_MINUTES.
+
+    A one-message session has no gap to measure and is left out rather than
+    counted as zero. The median is reported beside the mean because a few
+    long sessions pull the mean up.
     """
-    durations: list[float] = []
-    open_sessions = 0
-
-    for session in sessions:
-        started, ended = session.get("started_at"), session.get("ended_at")
-        if not ended:
-            open_sessions += 1
-            continue
-        try:
-            start = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
-            end = datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            continue
-        minutes = (end - start).total_seconds() / 60
-        # Clamped: clock skew produces negatives, and a session longer than
-        # four hours is an abandoned tab that was eventually closed, not study.
-        if 0 < minutes <= 240:
-            durations.append(minutes)
-
+    durations = [
+        sum(min((b - a).total_seconds() / 60, BREAK_MINUTES) for a, b in zip(ts, ts[1:]))
+        for ts in turns.values()
+        if len(ts) > 1
+    ]
     if not durations:
         return {
             "measured": False,
-            "reason": "No completed sessions yet.",
-            "open_sessions": open_sessions,
+            "reason": "No session has more than one question yet.",
+            "single_message_sessions": len(turns),
         }
 
     ordered = sorted(durations)
     middle = len(ordered) // 2
-    median = (
-        ordered[middle]
-        if len(ordered) % 2
-        else (ordered[middle - 1] + ordered[middle]) / 2
-    )
+    median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
     return {
         "measured": True,
-        "completed_sessions": len(durations),
-        "open_sessions": open_sessions,
+        "sessions": len(durations),
+        "single_message_sessions": len(turns) - len(durations),
         "total_minutes": round(sum(durations)),
         "mean_minutes": round(sum(durations) / len(durations), 1),
         "median_minutes": round(median, 1),
+        "break_minutes": BREAK_MINUTES,
+        "histogram": [
+            {"bucket": label, "sessions": sum(lo <= m < hi for m in durations)}
+            for lo, hi, label in SESSION_LENGTH_BUCKETS
+        ],
     }
+
+
+ACTIVITY_DAYS = 30
+
+
+def _daily_activity(sessions: list[dict], enrolled_ids: set[str], today=None) -> list[dict]:
+    """Sessions started and distinct enrolled students, per UTC day, last 30 days.
+
+    Every day is present, including quiet ones — a gap in the line would read
+    as missing data rather than a day nobody studied.
+    """
+    today = today or datetime.now(timezone.utc).date()
+    days = [today - timedelta(days=i) for i in range(ACTIVITY_DAYS - 1, -1, -1)]
+    per_day = {d: {"sessions": 0, "students": set()} for d in days}
+    for session in sessions:
+        # Staff previewing a course must not appear as student activity. This
+        # mirrors the cohort and time-on-task filters above.
+        if session.get("user_id") not in enrolled_ids:
+            continue
+        started = _parse_ts(session.get("started_at"))
+        day = started.date() if started else None
+        if day in per_day:
+            per_day[day]["sessions"] += 1
+            per_day[day]["students"].add(session["user_id"])
+    return [
+        {"date": d.isoformat(), "sessions": v["sessions"], "students": len(v["students"])}
+        for d, v in per_day.items()
+    ]
 
 
 def _mastery_summary(sb, course_id: str) -> dict:
@@ -231,6 +287,8 @@ def _mastery_summary(sb, course_id: str) -> dict:
         "bands": buckets,
         "weakest_topics": weakest,
         "strongest_topics": strongest,
+        # Every topic, weakest first, for the chart.
+        "topics": ranked,
     }
 
 

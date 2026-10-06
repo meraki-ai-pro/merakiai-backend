@@ -197,7 +197,7 @@ class TestAnalyticsHonesty:
         instrument is named rather than shown as a number.
 
         The list shrank when #20/#21 landed — mastery and pre/post gains are
-        measured now. time_on_task still has no instrument.
+        measured now, and time_on_task is measured from message activity.
         """
         src = Path(analytics.__file__).read_text(encoding="utf-8")
         assert '"unavailable"' in src
@@ -209,6 +209,40 @@ class TestAnalyticsHonesty:
         src = Path(analytics.__file__).read_text(encoding="utf-8")
         assert src.count('"measured": False') >= 2
         assert src.count('"reason"') >= 2
+
+    def test_time_on_task_counts_gaps_between_messages_capped_at_a_break(self):
+        from datetime import datetime, timedelta
+
+        t0 = datetime(2026, 10, 1, 9, 0)
+        at = lambda *mins: [t0 + timedelta(minutes=m) for m in mins]
+        result = analytics._time_on_task({
+            "a": at(0, 4, 10),       # 4 + 6 = 10 minutes
+            "b": at(0, 2, 2 * 60 * 24),  # 2 + a day-long gap capped at 15 = 17
+            "c": at(0),              # one message: nothing to measure
+        })
+        assert result["measured"] and result["sessions"] == 2
+        assert result["single_message_sessions"] == 1
+        assert result["total_minutes"] == 27 and result["median_minutes"] == 13.5
+        assert sum(h["sessions"] for h in result["histogram"]) == 2
+
+    def test_time_on_task_with_only_single_messages_is_not_measured(self):
+        from datetime import datetime
+
+        result = analytics._time_on_task({"a": [datetime(2026, 10, 1)]})
+        assert result["measured"] is False and "total_minutes" not in result
+
+    def test_daily_activity_excludes_lecturer_preview_sessions(self):
+        from datetime import date
+
+        result = analytics._daily_activity(
+            [
+                {"user_id": "student", "started_at": "2026-10-01T09:00:00Z"},
+                {"user_id": "lecturer", "started_at": "2026-10-01T10:00:00Z"},
+            ],
+            {"student"},
+            today=date(2026, 10, 1),
+        )
+        assert result[-1] == {"date": "2026-10-01", "sessions": 1, "students": 1}
 
     def test_one_failing_metric_does_not_fail_the_whole_dashboard(self):
         assert analytics._safe(lambda: 1 / 0, default="fallback") == "fallback"

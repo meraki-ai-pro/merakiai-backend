@@ -230,3 +230,37 @@ class TestSuggestedMarks:
 
         monkeypatch.setattr("app.ai.rag.claude.generate_response", never)
         assert (await exams.suggest_mark({"id": "q", "prompt": "p", "correct_answer": "m", "points": 2}, " "))[0] == 0
+
+
+class TestExamResultsExport:
+    QS = [{"id": "q1", "points": 2}, {"id": "q2", "points": 3}]
+    ATTEMPTS = [
+        {"student_id": "a", "question_id": "q1", "score": 2, "needs_review": False, "created_at": "2026-10-01T09:00:00"},
+        {"student_id": "a", "question_id": "q2", "score": 3, "needs_review": False, "created_at": "2026-10-01T09:05:00"},
+        {"student_id": "b", "question_id": "q1", "score": 1, "needs_review": False, "created_at": "2026-10-01T10:00:00"},
+        {"student_id": "b", "question_id": "q2", "score": 0, "needs_review": True, "created_at": "2026-10-01T10:02:00"},
+    ]
+
+    def test_stats_from_tally(self):
+        total, by_student = exams.tally(self.QS, self.ATTEMPTS)
+        stats = exams.exam_stats(total, by_student)
+        assert total == 5 and by_student["a"]["submitted_at"] == "2026-10-01T09:05:00"
+        assert (stats["mean_percent"], stats["highest_percent"], stats["lowest_percent"]) == (60.0, 100.0, 20.0)
+        assert stats["pass_rate"] == 50.0 and stats["pending_review"] == 1
+        assert sum(b["students"] for b in stats["distribution"]) == 2
+
+    def test_unsat_paper_has_no_invented_zeros(self):
+        assert "mean_percent" not in exams.exam_stats(1.0, {})
+
+    def test_workbook_has_a_sheet_per_exam_with_per_question_marks(self):
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        total, by_student = exams.tally(self.QS, self.ATTEMPTS)
+        paper = {"title": "Mid-sem: Limits/Derivatives", "kind": "midsem", "results_released": False}
+        data = [{"paper": paper, "questions": self.QS, "total_points": total, "by_student": by_student}] * 2
+        wb = load_workbook(BytesIO(exams.build_results_workbook("Calc", data, {"a": {"name": "Ama", "email": "a@x"}})))
+        assert len(wb.sheetnames) == 3 and len(set(wb.sheetnames)) == 3
+        ws = wb[wb.sheetnames[1]]
+        assert [c.value for c in ws[2]][:5] == ["Ama", "a@x", 2, 3, 5]

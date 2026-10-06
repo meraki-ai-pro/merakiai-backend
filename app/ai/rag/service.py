@@ -17,37 +17,6 @@ logger = logging.getLogger(__name__)
 # is built from whatever retrieval has already produced.
 RETRIEVAL_DEADLINE = float(os.getenv("RAG_RETRIEVAL_DEADLINE_MS", "5000")) / 1000
 
-_NO_REFERENCE_SENTENCE = (
-    "I don't have specific reference material from your course notes for this "
-    "answer. Please ask your lecturer whether this topic is examinable."
-)
-
-
-def _ensure_failure_disclaimer(raw_output: str, *, board: bool, concise: bool) -> tuple[str, str]:
-    """Deterministically add the retrieval-failure notice Claude may omit.
-
-    The prompt still asks for an honest admission because it produces a more
-    natural transition.  This guard is the safety property: an ungrounded
-    answer must never look as if it came from the lecturer's material merely
-    because the model ignored that instruction.
-
-    Returns the corrected output and the exact suffix, if any, so streaming
-    callers can publish the deterministic addition to the connected client.
-    """
-    if "reference material" in raw_output.lower():
-        return raw_output, ""
-
-    if board and not concise:
-        suffix = (
-            "\n\n::: slide Course material note\n"
-            f"{_NO_REFERENCE_SENTENCE}\n"
-            ":::"
-        )
-    else:
-        suffix = f"\n\n{_NO_REFERENCE_SENTENCE}"
-    return f"{raw_output.rstrip()}{suffix}", suffix
-
-
 async def query_rag(
     user_message: str,
     mode: str,
@@ -236,15 +205,9 @@ async def query_rag(
 
     help_level, help_asked, raw_output = help_ladder.parse(raw_output)
 
-    if verdict.should_admit_failure:
-        # A hint (rungs 1-4) is plain prose; a note slide would turn it into
-        # a one-slide deck.
-        is_hint = help_level is not None and 1 <= help_level <= 4
-        raw_output, suffix = _ensure_failure_disclaimer(
-            raw_output, board=board and not is_hint, concise=concise
-        )
-        if suffix and on_chunk is not None:
-            on_chunk(suffix)
+    # No appended "course material note": the client asked for it to go. The
+    # weak-retrieval directive (crag.INSUFFICIENT_CONTEXT_DIRECTIVE) still has
+    # the model say so in its own words when the notes do not cover a question.
 
     return {
         "mode": mode,

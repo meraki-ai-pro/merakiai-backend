@@ -377,7 +377,8 @@ content and reasoning, not for wording or spelling. Partial credit is allowed
 in steps of 0.5. Be consistent: the same answer must always earn the same mark.
 
 Return JSON only: {"score": <number from 0 to max>, "feedback": "<one or two
-sentences for the student: what was right, what was missing>"}.
+sentences addressed to the student as "you": what was right, what was
+missing>"}. Never write "the student".
 A lecturer reviews every suggestion before the student sees it."""
 
 
@@ -651,17 +652,10 @@ def results(assessment_id: str, user=Depends(lecturer_guard)):
     questions = sb.table("assessment_questions").select("id, points").eq(
         "assessment_id", assessment_id
     ).execute().data or []
-    total_points = sum(float(q["points"]) for q in questions) or 1.0
-
     attempts = sb.table("assessment_attempts").select("*").eq(
         "assessment_id", assessment_id
     ).execute().data or []
-
-    by_student: dict[str, dict] = {}
-    for a in attempts:
-        row = by_student.setdefault(a["student_id"], {"score": 0.0, "pending": 0})
-        row["score"] += float(a["score"] or 0)
-        row["pending"] += 1 if a.get("needs_review") else 0
+    total_points, by_student = tally(questions, attempts)
 
     names = _names(list(by_student))
     return {
@@ -682,6 +676,180 @@ def results(assessment_id: str, user=Depends(lecturer_guard)):
             for sid, row in sorted(by_student.items(), key=lambda x: -x[1]["score"])
         ],
     }
+
+
+def tally(questions: list[dict], attempts: list[dict]) -> tuple[float, dict[str, dict]]:
+    """Total marks on the paper, and each student's score / pending / per-question marks."""
+    total_points = sum(float(q["points"]) for q in questions) or 1.0
+    by_student: dict[str, dict] = {}
+    for a in attempts:
+        row = by_student.setdefault(
+            a["student_id"], {"score": 0.0, "pending": 0, "by_question": {}, "submitted_at": None}
+        )
+        mark = float(a.get("score") or 0)
+        row["score"] += mark
+        row["pending"] += 1 if a.get("needs_review") else 0
+        row["by_question"][a.get("question_id")] = mark
+        row["submitted_at"] = max(filter(None, (row["submitted_at"], a.get("created_at"))), default=None)
+    return total_points, by_student
+
+
+# Percentage bands for the score distribution, lowest first. 50 is the pass mark.
+SCORE_BANDS = ((0, 50, "0–49"), (50, 60, "50–59"), (60, 70, "60–69"), (70, 80, "70–79"), (80, 101, "80–100"))
+PASS_PERCENT = 50.0
+
+
+def exam_stats(total_points: float, by_student: dict[str, dict]) -> dict:
+    """Cohort figures for one paper. Only `responses` when nobody has sat it — never zeros."""
+    percents = sorted(100 * r["score"] / total_points for r in by_student.values())
+    if not percents:
+        return {"responses": 0, "pending_review": 0, "distribution": [{"band": b[2], "students": 0} for b in SCORE_BANDS]}
+    n, mid = len(percents), len(percents) // 2
+    median = percents[mid] if n % 2 else (percents[mid - 1] + percents[mid]) / 2
+    return {
+        "responses": n,
+        "mean_percent": round(sum(percents) / n, 1),
+        "median_percent": round(median, 1),
+        "highest_percent": round(percents[-1], 1),
+        "lowest_percent": round(percents[0], 1),
+        "pass_rate": round(100 * sum(p >= PASS_PERCENT for p in percents) / n, 1),
+        "pending_review": sum(r["pending"] for r in by_student.values()),
+        "distribution": [
+            {"band": label, "students": sum(lo <= p < hi for p in percents)}
+            for lo, hi, label in SCORE_BANDS
+        ],
+    }
+
+
+def _course_exam_data(course_id: str) -> list[dict]:
+    """Every exam on a course with its questions and attempts — three queries, not 3×N."""
+    sb = get_supabase()
+    papers = (
+        sb.table("assessments").select("*").eq("course_id", course_id)
+        .order("created_at").execute().data or []
+    )
+    papers = [p for p in papers if p["kind"] in EXAM_KINDS]
+    ids = [p["id"] for p in papers]
+    if not ids:
+        return []
+    questions = sb.table("assessment_questions").select("id, assessment_id, order_index, points").in_(
+        "assessment_id", ids
+    ).execute().data or []
+    attempts = sb.table("assessment_attempts").select(
+        "assessment_id, question_id, student_id, score, needs_review, created_at"
+    ).in_("assessment_id", ids).limit(100000).execute().data or []
+
+    out = []
+    for p in papers:
+        qs = sorted((q for q in questions if q["assessment_id"] == p["id"]), key=lambda q: q["order_index"] or 0)
+        total, by_student = tally(qs, [a for a in attempts if a["assessment_id"] == p["id"]])
+        out.append({"paper": p, "questions": qs, "total_points": total, "by_student": by_student})
+    return out
+
+
+@router.get("/course/{course_id}/summary")
+def exams_summary(course_id: str, user=Depends(lecturer_guard)):
+    """Cohort results for every exam on the course, for the analytics overview."""
+    assert_course_owner(user, course_id)
+    return {
+        "exams": [
+            {
+                "id": d["paper"]["id"],
+                "title": d["paper"]["title"],
+                "kind": d["paper"]["kind"],
+                "is_published": bool(d["paper"].get("is_published")),
+                "results_released": bool(d["paper"].get("results_released")),
+                "question_count": len(d["questions"]),
+                "total_points": d["total_points"],
+                **exam_stats(d["total_points"], d["by_student"]),
+            }
+            for d in _course_exam_data(course_id)
+        ]
+    }
+
+
+_KIND_LABELS = {"quiz": "Quiz", "test": "Test", "midsem": "Mid-semester", "final": "Final"}
+_BAD_SHEET_CHARS = re.compile(r"[\[\]:*?/\\]")
+
+
+def build_results_workbook(course_name: str, exams: list[dict], names: dict[str, dict]) -> bytes:
+    """A Summary sheet, then one sheet per exam: a row per student, a column per question."""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    bold = Font(bold=True)
+    wb = Workbook()
+    summary = wb.active
+    summary.title = "Summary"
+    summary.append([f"{course_name} — exam results"])
+    summary["A1"].font = Font(bold=True, size=14)
+    summary.append([])
+    header = ["Exam", "Type", "Out of", "Students", "Mean %", "Median %", "Highest %", "Lowest %",
+              f"Pass rate (≥{PASS_PERCENT:g}%)", "Answers awaiting review", "Results released"]
+    summary.append(header)
+    for cell in summary[3]:
+        cell.font = bold
+
+    used: set[str] = {"Summary"}
+    for d in exams:
+        paper, stats = d["paper"], exam_stats(d["total_points"], d["by_student"])
+        summary.append([
+            paper["title"], _KIND_LABELS.get(paper["kind"], paper["kind"]), d["total_points"],
+            stats["responses"], stats.get("mean_percent"), stats.get("median_percent"),
+            stats.get("highest_percent"), stats.get("lowest_percent"),
+            stats.get("pass_rate"), stats["pending_review"],
+            "Yes" if paper.get("results_released") else "No",
+        ])
+
+        # Sheet names: at most 31 characters, none of []:*?/\ and unique.
+        base = " ".join(_BAD_SHEET_CHARS.sub(" ", paper["title"]).split())[:28] or "Exam"
+        title, i = base, 2
+        while title in used:
+            title, i = f"{base[:26]} {i}", i + 1
+        used.add(title)
+        ws = wb.create_sheet(title)
+        q_cols = [f"Q{n} ({float(q['points']):g})" for n, q in enumerate(d["questions"], 1)]
+        ws.append(["Student", "Email", *q_cols, "Total", "Out of", "%", "Awaiting review", "Submitted"])
+        for cell in ws[1]:
+            cell.font = bold
+        for sid, r in sorted(d["by_student"].items(), key=lambda x: -x[1]["score"]):
+            who = names.get(sid, {})
+            ws.append([
+                who.get("name") or "", who.get("email") or "",
+                *[r["by_question"].get(q["id"]) for q in d["questions"]],
+                r["score"], d["total_points"], round(100 * r["score"] / d["total_points"], 1),
+                r["pending"], (r["submitted_at"] or "")[:16].replace("T", " "),
+            ])
+        ws.freeze_panes = "C2"
+        for col in range(1, ws.max_column + 1):
+            ws.column_dimensions[get_column_letter(col)].width = 28 if col <= 2 else 12
+
+    summary.column_dimensions["A"].width = 34
+    for col in range(2, len(header) + 1):
+        summary.column_dimensions[get_column_letter(col)].width = 14
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@router.get("/course/{course_id}/results.xlsx")
+def export_results(course_id: str, user=Depends(lecturer_guard)):
+    """Every exam's marks as an Excel workbook."""
+    from fastapi.responses import Response
+
+    assert_course_owner(user, course_id)
+    exams = _course_exam_data(course_id)
+    names = _names(list({sid for d in exams for sid in d["by_student"]}))
+    course = get_supabase().table("courses").select("name").eq("id", course_id).execute().data
+    content = build_results_workbook(course[0]["name"] if course else course_id, exams, names)
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{course_id}-exam-results.xlsx"'},
+    )
 
 
 @router.get("/{assessment_id}/marking")
