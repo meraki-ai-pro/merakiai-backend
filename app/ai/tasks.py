@@ -18,6 +18,7 @@ from app.core.chat_repo import (
     get_course_info,
 )
 from app.ai.rag.service import query_rag
+from app.ai.session_titles import title_session
 from app.media.video_service import maybe_generate_video
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET, upload_student_image
 from app.db.supabase import get_supabase, reset_async_supabase
@@ -235,6 +236,12 @@ async def _do_rag_turn(
         asyncio.to_thread(_previous_help_level, session_id, user_id),
     )
 
+    # First turn: name the session beside the answer, not in front of it.
+    # (If the turn fails, asyncio.run cancels this — the title is cosmetic.)
+    title_task = None if memory else asyncio.create_task(
+        title_session(session_id, message, course["name"], _publish_to_ws)
+    )
+
     if prefers_video is not None and mode != "review":
         response_format = "video" if prefers_video else "text"
     else:
@@ -247,10 +254,9 @@ async def _do_rag_turn(
     if images:
         response_format = "text"
 
-    # Stream the text answer for BOTH text and video responses. In video mode
-    # the persistent live avatar speaks in parallel, so streaming the transcript
-    # lets the student start reading in ~2-3s instead of waiting the full
-    # generate + TTS + avatar-render pipeline.
+    # Stream the text answer for BOTH text and video responses. In video mode,
+    # the recorded clip is rendered after the answer, so streaming lets the
+    # student start reading in ~2-3s instead of waiting for that pipeline.
     should_stream_text = True
 
     def _on_progress(stage: str, label: str) -> None:
@@ -382,6 +388,8 @@ async def _do_rag_turn(
         **delivery,
     }
     _publish_to_ws(session_id, final_result)
+    if title_task:
+        await title_task
     return final_result
 
 
@@ -436,6 +444,9 @@ async def _do_mode_session_start(
 
     ai_start = time.monotonic()
 
+    async def _title_from(prompt_text: str) -> None:
+        await title_session(session_id, prompt_text, course_name, _publish_to_ws)
+
     if mode == "review":
         _publish_status(session_id, "preparing", "Preparing your first question")
         item, contexts = await generate_review_item(
@@ -446,13 +457,16 @@ async def _do_mode_session_start(
             difficulty_descriptors=difficulty_descriptors,
         )
         prompt_text = format_review_prompt(item)
-        await _stream_mode_text(
-            session_id,
-            mode="review",
-            message_type="prompt",
-            content=prompt_text,
-            step=1,
-            total_steps=10,
+        await asyncio.gather(
+            _stream_mode_text(
+                session_id,
+                mode="review",
+                message_type="prompt",
+                content=prompt_text,
+                step=1,
+                total_steps=10,
+            ),
+            _title_from(prompt_text),
         )
         ai_ms = int((time.monotonic() - ai_start) * 1000)
 
@@ -514,13 +528,16 @@ async def _do_mode_session_start(
         difficulty_descriptors=difficulty_descriptors,
     )
     prompt_text = format_application_prompt(scenario, step=1)
-    await _stream_mode_text(
-        session_id,
-        mode="application",
-        message_type="prompt",
-        content=prompt_text,
-        step=1,
-        total_steps=3,
+    await asyncio.gather(
+        _stream_mode_text(
+            session_id,
+            mode="application",
+            message_type="prompt",
+            content=prompt_text,
+            step=1,
+            total_steps=3,
+        ),
+        _title_from(prompt_text),
     )
     ai_ms = int((time.monotonic() - ai_start) * 1000)
 

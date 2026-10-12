@@ -11,14 +11,8 @@ from app.db.supabase import get_supabase
 from app.media.text_cleaner import clean_for_tts
 from app.media.tts_service import tts_to_mp3_bytes
 from app.media.storage_service import upload_audio_and_get_url
-from app.media.did_agent_service import (
-    DidAgentError,
-    get_cached_stream,
-    speak as did_agent_speak,
-)
 from app.media.did_service import create_clip_async, create_clip_from_audio, DidError
 from app.media.tavus_service import create_tavus_video_async, create_tavus_video_from_audio, TavusError
-from app.utils.srt_vtt import convert_srt_to_vtt
 
 logger = logging.getLogger(__name__)
 
@@ -163,35 +157,6 @@ async def maybe_generate_video(
             detail=f"Invalid audio_url generated: {audio_url!r}",
         )
 
-    # ── D-ID Agents real-time path (preferred when frontend has an active stream) ──
-    stream_info = get_cached_stream(session_id)
-    if stream_info:
-        try:
-            await asyncio.to_thread(
-                did_agent_speak,
-                stream_info["agent_id"],
-                stream_info["stream_id"],
-                audio_url=audio_url,
-                did_session_id=stream_info["did_session_id"],
-            )
-            logger.info(
-                "D-ID agent speak dispatched  session=%s  stream=%s",
-                session_id, stream_info["stream_id"],
-            )
-            return {
-                "response_format": "video",
-                "audio_url": audio_url,
-                "video_url": None,          # video delivered via live WebRTC stream
-                "subtitle_url": "",
-                "source": "did_agent",
-                "streaming": True,
-            }
-        except DidAgentError as exc:
-            logger.warning(
-                "D-ID agent speak failed: %s — falling back to Tavus", exc
-            )
-    # ─────────────────────────────────────────────────────────────────────────
-
     use_webhooks = bool(_PUBLIC_BASE_URL)
     _webhook_secret = os.getenv("WEBHOOK_SECRET", "")
 
@@ -217,7 +182,7 @@ async def maybe_generate_video(
                 "response_format": "video",
                 "audio_url": audio_url,
                 "video_url": None,
-                "subtitle_url": "",
+                "subtitles_url": "",
                 "clip_id": clip_id,
                 "pending": True,
                 "source": "did_clips",
@@ -235,13 +200,12 @@ async def maybe_generate_video(
                 or clip.get("url") or clip.get("result")
             )
             subtitle_url = clip.get("subtitles_url")
-            vtt_data = convert_srt_to_vtt(subtitle_url) if subtitle_url else ""
             logger.info("D-ID clip ready (poll)  session=%s  url=%s", session_id, video_url)
             return {
                 "response_format": "video",
                 "audio_url": audio_url,
                 "video_url": video_url,
-                "subtitle_url": vtt_data,
+                "subtitles_url": subtitle_url or "",
                 "source": "did_clips",
             }
     except DidError as clips_err:
@@ -274,7 +238,7 @@ async def maybe_generate_video(
                 "response_format": "video",
                 "audio_url": audio_url,
                 "video_url": None,
-                "subtitle_url": "",
+                "subtitles_url": "",
                 "video_id": video_id,
                 "pending": True,
                 "source": "tavus",
@@ -292,7 +256,7 @@ async def maybe_generate_video(
                 "response_format": "video",
                 "audio_url": audio_url,
                 "video_url": video_url,
-                "subtitle_url": "",
+                "subtitles_url": "",
                 "source": "tavus",
             }
     except Exception as tavus_err:

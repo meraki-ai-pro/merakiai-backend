@@ -13,7 +13,13 @@ _lock = threading.Lock()
 # Invalidated on every write; safe because all writes go through _lock.
 _overrides_cache: Optional[Dict[str, Any]] = None
 
-VALID_MODES = {"learn", "application", "review", "review_generation"}
+VALID_MODES = {
+    "learn",
+    "application",
+    "review",
+    "review_generation",
+    "session_title",
+}
 
 DEFAULTS: Dict[str, Dict[str, Any]] = {
     "learn": {
@@ -64,6 +70,12 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "model": "claude-sonnet-4-6",
         "temperature": 0.0,
         "max_tokens": 400,
+    },
+    # Sidebar session titles: a few words, so the smallest, fastest model.
+    "session_title": {
+        "model": "claude-haiku-4-5-20251001",
+        "temperature": 0.0,
+        "max_tokens": 24,
     },
     # Intervention Studio: suggested responses and targeted practice papers.
     # Room for 15 questions of JSON with options; a little temperature so a
