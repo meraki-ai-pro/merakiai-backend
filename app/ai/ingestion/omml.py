@@ -506,8 +506,3 @@ def omml_to_latex(element) -> str:
         return ""
 
 
-def iter_omml(parent) -> List:
-    """Return every ``m:oMath`` element beneath ``parent`` in document order."""
-    return parent.findall(f".//{_m('oMath')}")
-
-

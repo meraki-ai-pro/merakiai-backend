@@ -31,6 +31,7 @@ set is safe.
 | 015 | pptx knowledge uploads | `storage.buckets.allowed_mime_types` for `course-documents` |
 | 016 | UDL round | `sessions.title`, `users.deleted_at`, exam columns on `assessments*`, `assessment_starts`, `enrolments.extra_time_percent`, `media_assets.beats` |
 | 017 | targeted_assessments | `assessments.target_student_ids` (Intervention Studio: papers for chosen students) |
+| 018 | session_pin_archive | `sessions.pinned_at`, `sessions.archived_at` (pin and archive in the sidebar) |
 
 ## Dependencies worth knowing
 
@@ -55,6 +56,8 @@ columns to `documents` and `media_assets`.
 **016 after 004, 008 and 010.** It alters `enrolments`, `media_assets` and the assessment tables.
 
 **017 after 010.** One nullable column on `assessments`; NULL keeps every existing paper course-wide.
+
+**018 after 016.** Two nullable timestamps on `sessions`; NULL keeps every existing session unpinned and visible.
 
 **003 redefines `is_admin()` deliberately.** It is referenced by roughly thirty
 RLS policies. If the existing definition happened to be `role <> 'user'` rather

@@ -14,7 +14,10 @@ from app.core.enrolment import (
 )
 from app.db.supabase import get_supabase, get_user_client
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET, signed_url
-from app.models.models import VideoToggle, SessionModeUpdate, SessionCreateRequest, SessionTitleUpdate
+from app.models.models import (
+    SessionArchiveUpdate, SessionCreateRequest, SessionModeUpdate, SessionPinUpdate,
+    SessionTitleUpdate, VideoToggle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,26 +109,42 @@ def list_sessions(
     user=Depends(auth_guard),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    archived: bool = Query(False, description="True lists only archived sessions"),
 ):
-    """Return all sessions for the authenticated user, newest first."""
+    """Return the user's sessions, newest first.
+
+    Archived sessions are left out of the sidebar list and shown on their own
+    page (``?archived=true``). Pinned sessions come back flagged; the client
+    groups them at the top.
+    """
     supabase = get_user_client(user["token"])
 
-    def _rows(columns: str):
+    def _rows(columns: str, *, filter_archived: bool):
+        query = supabase.table("sessions").select(columns).eq("user_id", user["id"])
+        if filter_archived:
+            query = (
+                query.not_.is_("archived_at", "null") if archived
+                else query.is_("archived_at", "null")
+            )
         return (
-            supabase.table("sessions")
-            .select(columns)
-            .eq("user_id", user["id"])
-            .order("started_at", desc=True)
+            query.order("started_at", desc=True)
             .range(offset, offset + limit - 1)
             .execute()
         )
 
     base_columns = "id, current_mode, prefers_video, started_at, ended_at, course_id"
     try:
-        rows = _rows(base_columns + ", title")
+        rows = _rows(base_columns + ", title, pinned_at, archived_at", filter_archived=True)
     except Exception:
-        # sql/016 not applied: no stored titles, so every one is derived.
-        rows = _rows(base_columns)
+        # sql/018 not applied: nothing can be archived yet, so the archive is
+        # empty and the main list is every session, as before.
+        if archived:
+            return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
+        try:
+            rows = _rows(base_columns + ", title", filter_archived=False)
+        except Exception:
+            # sql/016 not applied either: no stored titles, every one is derived.
+            rows = _rows(base_columns, filter_archived=False)
     session_rows = rows.data or []
     session_ids = [row["id"] for row in session_rows]
     titles: dict[str, str] = {}
@@ -169,6 +188,8 @@ def list_sessions(
             "message_count": message_counts.get(sid, 0),
             "started_at": row.get("started_at"),
             "ended_at": row.get("ended_at"),
+            "pinned_at": row.get("pinned_at"),
+            "archived_at": row.get("archived_at"),
         })
     return {"sessions": sessions, "total": len(sessions), "limit": limit, "offset": offset}
 
@@ -413,6 +434,44 @@ def rename_session(session_id: str, payload: SessionTitleUpdate, user=Depends(au
             status_code=503, detail="Renaming sessions is not available yet."
         ) from exc
     return {"session_id": sid, "title": title}
+
+
+def _set_session_flags(session_id: str, user: dict, updates: dict) -> None:
+    """Write pin/archive columns on the caller's own session.
+
+    The user client means RLS decides ownership, exactly as for rename; a
+    session that is not theirs reads as missing.
+    """
+    sid = _validate_uuid(session_id)
+    supabase = get_user_client(user["token"])
+    if not supabase.table("sessions").select("id").eq("id", sid).execute().data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        supabase.table("sessions").update(updates).eq("id", sid).execute()
+    except Exception as exc:
+        logger.warning("Session flag update failed for %s: %s", sid, exc)
+        raise HTTPException(
+            status_code=503, detail="Pinning and archiving are not available yet."
+        ) from exc
+
+
+@router.patch("/{session_id}/pin")
+def pin_session(session_id: str, payload: SessionPinUpdate, user=Depends(auth_guard)):
+    pinned_at = _now_iso() if payload.pinned else None
+    _set_session_flags(session_id, user, {"pinned_at": pinned_at})
+    return {"session_id": session_id, "pinned_at": pinned_at}
+
+
+@router.patch("/{session_id}/archive")
+def archive_session(session_id: str, payload: SessionArchiveUpdate, user=Depends(auth_guard)):
+    archived_at = _now_iso() if payload.archived else None
+    # Archiving unpins: an archived session is out of the sidebar, so a pin
+    # on it would be invisible and would resurface oddly on unarchive.
+    updates = {"archived_at": archived_at}
+    if payload.archived:
+        updates["pinned_at"] = None
+    _set_session_flags(session_id, user, updates)
+    return {"session_id": session_id, "archived_at": archived_at}
 
 
 @router.post("/{session_id}/end")

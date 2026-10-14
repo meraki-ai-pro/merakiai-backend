@@ -329,11 +329,6 @@ def approved_concepts(course_id: str) -> list[tuple[str, str]]:
     return sorted(described.items())
 
 
-def approved_concept_keys(course_id: str) -> list[str]:
-    """Concept keys with an approved, rendered video on this course."""
-    return [key for key, _ in approved_concepts(course_id)]
-
-
 _PLAYABLE_COLUMNS = "id, concept_key, storage_path, duration_seconds, archetype, renderer"
 
 

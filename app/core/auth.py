@@ -158,16 +158,6 @@ def assert_course_owner(user: dict, course_id: str) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
 
 
-async def course_owner_guard(course_id: str, user=Depends(lecturer_guard)):
-    """Drop-in dependency for any route whose path contains ``{course_id}``.
-
-    FastAPI resolves ``course_id`` from the path, so this composes as
-    ``Depends(course_owner_guard)`` without repeating the ownership call.
-    """
-    assert_course_owner(user, course_id)
-    return user
-
-
 async def auth_guard(credentials: HTTPAuthorizationCredentials = Depends(security)):
     user = _validate_token(credentials)
     return {

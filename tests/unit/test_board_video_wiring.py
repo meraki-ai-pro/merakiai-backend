@@ -113,7 +113,7 @@ class TestApprovedKeyLookup:
             service, "get_supabase", lambda: type("S", (), {"table": lambda s, n: FakeQuery()})()
         )
 
-        assert service.approved_concept_keys("maths-101") == ["chain-rule"]
+        assert [k for k, _ in service.approved_concepts("maths-101")] == ["chain-rule"]
         assert captured["status"] == "ready"
         assert captured["not_approved_at"] == "null"
         assert captured["course_id"] == "maths-101"
@@ -126,7 +126,7 @@ class TestApprovedKeyLookup:
             raise RuntimeError('relation "media_assets" does not exist')
 
         monkeypatch.setattr(service, "get_supabase", boom)
-        assert service.approved_concept_keys("maths-101") == []
+        assert [k for k, _ in service.approved_concepts("maths-101")] == []
 
     def test_duplicate_keys_are_collapsed(self, monkeypatch):
         from app.media.render import service
@@ -155,7 +155,7 @@ class TestApprovedKeyLookup:
         monkeypatch.setattr(
             service, "get_supabase", lambda: type("S", (), {"table": lambda s, n: FakeQuery()})()
         )
-        assert service.approved_concept_keys("c") == ["chain-rule", "limits"]
+        assert [k for k, _ in service.approved_concepts("c")] == ["chain-rule", "limits"]
 
     def test_concepts_carry_topic_and_script_opening(self, monkeypatch):
         from app.media.render import service

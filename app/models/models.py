@@ -73,6 +73,14 @@ class SessionTitleUpdate(BaseModel):
     title: str = Field(..., min_length=1, max_length=120)
 
 
+class SessionPinUpdate(BaseModel):
+    pinned: bool
+
+
+class SessionArchiveUpdate(BaseModel):
+    archived: bool
+
+
 class UpdatePasswordPayload(BaseModel):
     # Required, not optional. Without it a stolen access token is enough to
     # take an account over permanently — the thief sets a new password and the

@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 
 from app.core import audit
 from app.core.auth import admin_guard, require_mfa_if_enrolled
@@ -41,6 +41,36 @@ class RoleUpdatePayload(BaseModel):
     role: str
 
 
+class UserCreatePayload(BaseModel):
+    email: EmailStr
+    # Set by the super admin and shared with the person, who can change it from
+    # their account page. An invite email would depend on Supabase SMTP, which
+    # this deployment does not rely on for anything else.
+    password: str = Field(..., min_length=8, max_length=128)
+    role: str = "user"
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    university_name: str = Field("", max_length=200)
+    region: str = Field("", max_length=100)
+    country: str = Field("", max_length=100)
+
+
+class UserUpdatePayload(BaseModel):
+    """Every field optional: only what is sent changes."""
+    email: EmailStr | None = None
+    password: str | None = Field(None, min_length=8, max_length=128)
+    first_name: str | None = Field(None, min_length=1, max_length=100)
+    last_name: str | None = Field(None, min_length=1, max_length=100)
+    university_name: str | None = Field(None, max_length=200)
+    region: str | None = Field(None, max_length=100)
+    country: str | None = Field(None, max_length=100)
+
+
+def _require_super_admin(user: dict, action: str) -> None:
+    if user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail=f"Only super admins can {action}")
+
+
 @router.get("")
 def list_users(
     page: int = Query(1, ge=1),
@@ -70,7 +100,7 @@ def list_users(
             )
         return q.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
 
-    columns = "id, email, role, first_name, last_name, university_name, country, created_at"
+    columns = "id, email, role, first_name, last_name, university_name, region, country, created_at"
     try:
         res = _query(columns + ", deleted_at", filter_deleted=not include_deleted)
     except Exception:
@@ -158,6 +188,103 @@ def update_user_role(
     if not res.data:
         raise HTTPException(status_code=404, detail="User not found")
     return {"status": "ok", "user_id": user_id, "new_role": new_role}
+
+
+@router.post("")
+def create_user(
+    payload: UserCreatePayload,
+    request: Request,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
+    """Create a student, lecturer or admin account, ready to sign in."""
+    _require_super_admin(user, "create accounts")
+    if payload.role not in _ROLE_HIERARCHY:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {payload.role!r}")
+
+    sb = get_supabase()
+    profile = {
+        "first_name": payload.first_name.strip(),
+        "last_name": payload.last_name.strip(),
+        "university_name": payload.university_name.strip(),
+        "region": payload.region.strip(),
+        "country": payload.country.strip(),
+    }
+    try:
+        created = sb.auth.admin.create_user({
+            "email": payload.email,
+            "password": payload.password,
+            # The super admin vouches for the address; no confirmation email.
+            "email_confirm": True,
+            "user_metadata": {"first_name": profile["first_name"], "last_name": profile["last_name"]},
+        }).user
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc).lower()
+        if "already" in message or "registered" in message or "exists" in message:
+            raise HTTPException(status_code=409, detail="An account with this email already exists")
+        raise HTTPException(status_code=400, detail="Could not create the account") from exc
+
+    row = {**profile, "email": payload.email, "role": payload.role}
+    # The auth trigger normally creates the profile row; fill it in. Without
+    # the trigger, insert it — users requires an active avatar, which signup
+    # otherwise assigns on first sign-in.
+    if not sb.table("users").update(row).eq("id", created.id).execute().data:
+        bundles = sb.table("avatar_voice_bundles").select("avatar_id, is_active").execute().data or []
+        avatar = next((b["avatar_id"] for b in bundles if b.get("is_active")), None)
+        sb.table("users").insert({**row, "id": created.id, "avatar_id": avatar}).execute()
+
+    # Same as signup: a class list imported before this account existed has
+    # invitations waiting on the address.
+    try:
+        sb.rpc("accept_enrolment_invitations", {"p_user_id": created.id, "p_email": payload.email}).execute()
+    except Exception:  # noqa: BLE001 — sql/013 may not be applied
+        pass
+
+    audit.record(
+        actor=user, action="user.create", resource_type="user", resource_id=created.id,
+        new_values={"email": payload.email, "role": payload.role}, request=request,
+    )
+    return {"status": "ok", "user_id": created.id, "email": payload.email, "role": payload.role}
+
+
+@router.patch("/{user_id}")
+def update_user(
+    user_id: str,
+    payload: UserUpdatePayload,
+    request: Request,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
+    """Edit an account's details, email or password. Role has its own endpoint."""
+    _require_super_admin(user, "edit accounts")
+    sb = get_supabase()
+    target = _load_target(sb, user_id)
+
+    changes = payload.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+
+    auth_changes = {k: changes.pop(k) for k in ("email", "password") if k in changes}
+    if auth_changes:
+        try:
+            sb.auth.admin.update_user_by_id(user_id, auth_changes)
+        except Exception as exc:  # noqa: BLE001
+            if "email" in auth_changes and "already" in str(exc).lower():
+                raise HTTPException(status_code=409, detail="That email is already in use") from exc
+            raise HTTPException(status_code=400, detail="Could not update sign-in details") from exc
+    if "email" in auth_changes:
+        changes["email"] = auth_changes["email"]
+    if changes:
+        sb.table("users").update(changes).eq("id", user_id).execute()
+
+    audit.record(
+        actor=user, action="user.update", resource_type="user", resource_id=user_id,
+        old_values={"email": target.get("email")},
+        # Never the password itself — only that it was reset.
+        new_values={**changes, **({"password": "reset"} if "password" in auth_changes else {})},
+        request=request,
+    )
+    return {"status": "ok", "user_id": user_id}
 
 
 def _load_target(sb, user_id: str) -> dict:

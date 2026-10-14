@@ -70,10 +70,6 @@ def get(name: str) -> Renderer:
         ) from None
 
 
-def available() -> list[str]:
-    return sorted(_registry)
-
-
 def clear() -> None:
     """Test hook — never call this from application code."""
     _registry.clear()
