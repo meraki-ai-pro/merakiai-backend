@@ -45,16 +45,25 @@ class SignUpPayload(BaseModel):
     university_name: str = Field(..., max_length=200)
     region: str = Field(..., max_length=100)
     country: str = Field(..., max_length=100)
+    # hCaptcha response token. Supabase Auth verifies it when captcha protection
+    # is enabled in the dashboard; the backend only forwards it.
+    captcha_token: str | None = Field(None, max_length=4096)
 
 
 class LoginPayload(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=1, max_length=128)
+    # hCaptcha response token. Supabase Auth verifies it when captcha protection
+    # is enabled in the dashboard; the backend only forwards it.
+    captcha_token: str | None = Field(None, max_length=4096)
 
 
 class ForgotPasswordPayload(BaseModel):
     email: EmailStr
     redirect_to: AnyHttpUrl | None = None  # must be a valid URL; origin checked against ALLOWED_ORIGINS in route
+    # hCaptcha response token. Supabase Auth verifies it when captcha protection
+    # is enabled in the dashboard; the backend only forwards it.
+    captcha_token: str | None = Field(None, max_length=4096)
 
 
 class ResetPasswordPayload(BaseModel):
@@ -88,6 +97,9 @@ class UpdatePasswordPayload(BaseModel):
     # is what makes the token alone insufficient.
     current_password: str = Field(..., min_length=1, max_length=128)
     new_password: str = Field(..., min_length=8, max_length=128)
+    # hCaptcha response token. Supabase Auth verifies it when captcha protection
+    # is enabled in the dashboard; the backend only forwards it.
+    captcha_token: str | None = Field(None, max_length=4096)
 
 
 class UpdateProfilePayload(BaseModel):
