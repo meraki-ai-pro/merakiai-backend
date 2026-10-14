@@ -27,7 +27,7 @@ recovery_security = HTTPBearer()
 def _raise_if_captcha(exc: Exception) -> None:
     """Report a failed captcha as itself.
 
-    Supabase rejects a missing, expired or reused hCaptcha token before it
+    Supabase rejects a missing, expired or reused Turnstile token before it
     looks at the password, so without this the user would be told their
     password was wrong when it was the captcha.
     """

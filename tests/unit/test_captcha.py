@@ -1,4 +1,4 @@
-"""hCaptcha: the backend forwards the token; Supabase Auth verifies it."""
+"""Captcha (Cloudflare Turnstile): the backend forwards the token; Supabase Auth verifies it."""
 
 import pytest
 from fastapi import HTTPException
