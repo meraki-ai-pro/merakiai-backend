@@ -191,21 +191,24 @@ def require_mode_enabled(course_id: str, mode: str) -> None:
         )
 
 
-def redeem_code(code: str, token: str) -> dict:
-    """Redeem an invite code as the calling student.
+def redeem_code(code: str, student_id: str) -> dict:
+    """Redeem an invite code for the calling student.
 
-    Runs through the user's own JWT so ``auth.uid()`` inside the SQL function
-    resolves to the student. Calling this with the service-role client would
-    make auth.uid() NULL and the function would refuse.
+    Calls redeem_invite_code_for (sql/020) with the service role, passing the
+    student id from the already-verified JWT. The function is not callable by
+    signed-in users over REST — the old redeem_invite_code was, which the
+    Supabase security advisor flagged.
     """
-    from app.db.supabase import get_user_client
+    from app.db.supabase import get_supabase
 
     cleaned = (code or "").strip()
     if not cleaned:
         raise HTTPException(status_code=400, detail="Invite code is required")
 
     try:
-        result = get_user_client(token).rpc("redeem_invite_code", {"p_code": cleaned}).execute()
+        result = get_supabase().rpc(
+            "redeem_invite_code_for", {"p_student_id": student_id, "p_code": cleaned}
+        ).execute()
     except Exception as exc:  # noqa: BLE001 — surface the SQL function's message
         raise HTTPException(status_code=400, detail=_redemption_error(exc)) from exc
 

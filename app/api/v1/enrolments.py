@@ -26,10 +26,10 @@ def join_course(payload: JoinPayload, user=Depends(auth_guard)):
     """Redeem an invite code.
 
     All validation, the uses_count increment and the enrolment insert happen
-    inside one SQL transaction (redeem_invite_code) so two students racing for
+    inside one SQL transaction (redeem_invite_code_for) so two students racing for
     the last seat cannot both win.
     """
-    enrolment = redeem_code(payload.code, user["token"])
+    enrolment = redeem_code(payload.code, user["id"])
     events.emit(
         events.ENROLMENT_CREATED,
         user_id=user["id"],

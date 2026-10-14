@@ -32,6 +32,9 @@ set is safe.
 | 016 | UDL round | `sessions.title`, `users.deleted_at`, exam columns on `assessments*`, `assessment_starts`, `enrolments.extra_time_percent`, `media_assets.beats` |
 | 017 | targeted_assessments | `assessments.target_student_ids` (Intervention Studio: papers for chosen students) |
 | 018 | session_pin_archive | `sessions.pinned_at`, `sessions.archived_at` (pin and archive in the sidebar) |
+| 019 | security_advisor_hardening | Revokes REST access to server-only SECURITY DEFINER functions (invitation acceptance was exploitable), pins search_path |
+| 020 | private_helpers_and_extensions | RLS helpers → `private` schema, pgvector → `extensions`, server-only `redeem_invite_code_for` |
+| 021 | drop_client_redeem_invite_code | Drops the old client-callable `redeem_invite_code` — **only after the backend using 020 is deployed** |
 
 ## Dependencies worth knowing
 
@@ -58,6 +61,14 @@ columns to `documents` and `media_assets`.
 **017 after 010.** One nullable column on `assessments`; NULL keeps every existing paper course-wide.
 
 **018 after 016.** Two nullable timestamps on `sessions`; NULL keeps every existing session unpinned and visible.
+
+**020 moves the RLS helpers to `private`.** Policies follow by OID, so nothing
+breaks, but any policy written after 020 must call `private.is_admin()` (and
+`private.owns_course()`, etc.), not `public.…`. Re-running 003/004 would
+recreate unused public copies.
+
+**021 waits for a deploy.** The previous backend calls `redeem_invite_code`
+with the student's JWT; dropping it first breaks "Join with an invite code".
 
 **003 redefines `is_admin()` deliberately.** It is referenced by roughly thirty
 RLS policies. If the existing definition happened to be `role <> 'user'` rather

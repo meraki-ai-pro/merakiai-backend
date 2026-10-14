@@ -221,3 +221,40 @@ class TestUpdateAccount:
         with pytest.raises(HTTPException) as e:
             admin_users.update_user("u9", admin_users.UserUpdatePayload(), None, SUPER, None)
         assert e.value.status_code == 400
+
+
+# ── Invite redemption (sql/020) ───────────────────────────────────────────────
+
+class TestInviteRedemption:
+    def test_server_side_function_gets_the_verified_student_id(self, monkeypatch):
+        """The student id comes from the JWT the backend verified, never from
+        the request body, and the call uses the service role — the function is
+        not callable by signed-in users over REST."""
+        from app.core import enrolment
+        import app.db.supabase as supa
+
+        calls = []
+
+        class RPC:
+            def __init__(self, name, args):
+                calls.append((name, args))
+
+            def execute(self):
+                return type("R", (), {"data": {"course_id": "c1", "student_id": "stu-1"}})()
+
+        monkeypatch.setattr(supa, "get_supabase", lambda: type("S", (), {"rpc": lambda s, n, a: RPC(n, a)})())
+        out = enrolment.redeem_code("  abc123 ", "stu-1")
+        assert calls == [("redeem_invite_code_for", {"p_student_id": "stu-1", "p_code": "abc123"})]
+        assert out["course_id"] == "c1"
+
+    def test_function_messages_reach_the_student(self, monkeypatch):
+        from app.core import enrolment
+        import app.db.supabase as supa
+
+        def boom(*_a):
+            raise RuntimeError("{'message': 'This invite code has expired', 'code': 'P0002'}")
+
+        monkeypatch.setattr(supa, "get_supabase", lambda: type("S", (), {"rpc": lambda s, n, a: type("X", (), {"execute": boom})()})())
+        with pytest.raises(HTTPException) as e:
+            enrolment.redeem_code("abc", "stu-1")
+        assert e.value.status_code == 400 and "expired" in e.value.detail
