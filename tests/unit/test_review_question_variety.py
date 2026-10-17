@@ -31,6 +31,7 @@ ITEM = {
     "category": "Related Rates",
     "question": "A balloon is inflated at 2 cm/s. How fast is the volume growing?",
     "options": {"A": "100pi", "B": "200pi", "C": "400pi", "D": "500pi"},
+    "correct": "C",
 }
 
 

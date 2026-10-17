@@ -18,11 +18,14 @@ from app.ai.ingestion.service import (
     ingest_document,
     parse_question_formats,
     parse_target_modes,
+    register_document,
 )
+from app.ai.ingestion.video import VIDEO_CONTENT_TYPES
 from app.ai.rag.visibility import invalidate as invalidate_visibility
 from app.core import audit
 from app.core.auth import assert_course_owner, lecturer_guard
 from app.db.supabase import get_supabase
+from app.media.storage_service import COURSE_VIDEOS_BUCKET, _safe_segment
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,18 @@ class KnowledgeUpdate(BaseModel):
     # live on the document row and are read at query time.
     difficulty: Literal["basic", "intermediate", "advanced"] | None = None
     question_formats: list[Literal["mcq", "fill_blank", "short_answer"]] | None = None
+
+
+class VideoAdd(BaseModel):
+    """A lecture video: ``filename`` to upload one, or ``link`` to a hosted one."""
+    filename: str | None = Field(None, max_length=300)
+    link: str | None = Field(None, max_length=2000, pattern=r"^https://")
+    title: str | None = Field(None, max_length=300)
+    default_mode: str = "learn"
+    target_modes: list[str] | None = None
+    difficulty: str = "basic"
+    topic: str | None = None
+    is_published: bool = False
 
 
 class TestQuery(BaseModel):
@@ -187,6 +202,79 @@ async def upload_knowledge(
         request=request,
     )
     return result
+
+
+@router.post("/videos")
+def add_video(course_id: str, payload: VideoAdd, request: Request, user=Depends(lecturer_guard)):
+    """Register a lecture video as course material.
+
+    A link is transcribed straight away. An upload returns a signed upload URL:
+    the browser sends the file directly to storage (no 50 MB API cap, nothing
+    large through this process), then calls ``/{document_id}/video-uploaded``.
+    """
+    assert_course_owner(user, course_id)
+    if bool(payload.filename) == bool(payload.link):
+        raise HTTPException(status_code=400, detail="Send a filename to upload, or a link — one of the two.")
+    if payload.filename:
+        ext = payload.filename.rsplit(".", 1)[-1].lower()
+        if ext not in VIDEO_CONTENT_TYPES:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported video type '.{ext}'. Allowed: {', '.join(sorted(VIDEO_CONTENT_TYPES))}",
+            )
+    try:
+        modes = parse_target_modes(",".join(payload.target_modes or []), payload.default_mode)
+        doc = register_document(
+            payload.title or payload.filename or payload.link, course_id, "knowledge",
+            payload.default_mode, payload.difficulty, "1", user["id"],
+            target_modes=modes, is_published=payload.is_published, topic=payload.topic,
+            extra={"media_url": payload.link} if payload.link else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    audit.record(
+        actor=user, action="knowledge.video", resource_type="document",
+        resource_id=doc["id"], course_id=course_id,
+        new_values={"link": payload.link, "filename": payload.filename, "target_modes": modes},
+        request=request,
+    )
+    if payload.link:
+        _queue_video(doc)
+        return {"document_id": doc["id"], "status": "processing"}
+
+    path = f"{_safe_segment(course_id)}/{_safe_segment(doc['id'])}/{_safe_segment(payload.filename)}"
+    sb = get_supabase()
+    sb.table("documents").update({"storage_path": path}).eq("id", doc["id"]).execute()
+    upload = sb.storage.from_(COURSE_VIDEOS_BUCKET).create_signed_upload_url(path)
+    return {
+        "document_id": doc["id"], "status": "awaiting_upload",
+        "bucket": COURSE_VIDEOS_BUCKET, "path": path, "token": upload["token"],
+    }
+
+
+@router.post("/{document_id}/video-uploaded")
+def video_uploaded(course_id: str, document_id: str, user=Depends(lecturer_guard)):
+    """The browser finished uploading: start transcription."""
+    assert_course_owner(user, course_id)
+    rows = (
+        get_supabase().table("documents")
+        .select("id, source_filename, course_id, default_mode, difficulty, storage_path")
+        .eq("id", document_id).eq("course_id", course_id).execute().data
+    )
+    if not rows or not rows[0].get("storage_path"):
+        raise HTTPException(status_code=404, detail="No uploaded video with that id on this course")
+    _queue_video(rows[0])
+    return {"document_id": document_id, "status": "processing"}
+
+
+def _queue_video(doc: dict) -> None:
+    from app.ai.tasks import process_video_ingestion_task
+
+    process_video_ingestion_task.apply_async(
+        args=[doc["id"], doc["source_filename"], doc["course_id"], doc["default_mode"], doc["difficulty"]],
+        queue="ingestion_tasks",
+    )
 
 
 @router.patch("/{document_id}")

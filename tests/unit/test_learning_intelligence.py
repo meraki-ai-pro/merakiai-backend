@@ -37,7 +37,7 @@ class TestTopicVocabulary:
             return ["ref"]
 
         async def fake_generate(**_):
-            return '{"type":"mcq","question":"q?","options":{"A":"1"},"correct_answer":"A","category":"limits"}'
+            return '{"type":"mcq","question":"q?","options":{"A":"1","B":"2"},"correct":"A","category":"limits"}'
 
         monkeypatch.setattr(service, "retrieve_context", fake_retrieve)
         monkeypatch.setattr(service, "generate_response", fake_generate)

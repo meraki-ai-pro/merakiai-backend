@@ -101,13 +101,14 @@ class TestImportCoercion:
 
 
 class TestTiming:
-    def test_extra_time_extends_the_limit(self):
-        assert effective_minutes(60, 25) == 75
+    def test_extra_time_adds_minutes(self):
+        assert effective_minutes(60, 15) == 75
+        assert effective_minutes(60, 0) == 60
         assert effective_minutes(None, 50) is None
 
     def test_deadline_is_from_the_server_start(self):
         start = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
-        assert deadline_for(start, 30, 50) == start + timedelta(minutes=45)
+        assert deadline_for(start, 30, 15) == start + timedelta(minutes=45)
 
 
 class TestAnswerKeyNeverReachesAStudent:

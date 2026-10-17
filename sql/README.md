@@ -35,6 +35,8 @@ set is safe.
 | 019 | security_advisor_hardening | Revokes REST access to server-only SECURITY DEFINER functions (invitation acceptance was exploitable), pins search_path |
 | 020 | private_helpers_and_extensions | RLS helpers → `private` schema, pgvector → `extensions`, server-only `redeem_invite_code_for` |
 | 021 | drop_client_redeem_invite_code | Drops the old client-callable `redeem_invite_code` — **only after the backend using 020 is deployed** |
+| 022 | extra_time_minutes | `enrolments.extra_time_minutes` (exam accommodations in minutes; `extra_time_percent` is no longer read) |
+| 023 | course_video_sources | `course-videos` bucket, `documents.media_url` (lecture videos, uploaded or linked, as course sources) |
 
 ## Dependencies worth knowing
 

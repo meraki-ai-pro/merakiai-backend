@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -71,6 +72,8 @@ class AssessmentCreate(BaseModel):
     time_limit_minutes: int | None = Field(None, ge=1, le=600)
     opens_at: datetime | None = None
     closes_at: datetime | None = None
+    # Only these students see the paper. Empty / omitted = the whole course.
+    target_student_ids: list[str] | None = Field(None, max_length=1000)
 
     @model_validator(mode="after")
     def _window_is_ordered(self):
@@ -85,6 +88,8 @@ class AssessmentUpdate(BaseModel):
     time_limit_minutes: int | None = Field(None, ge=1, le=600)
     opens_at: datetime | None = None
     closes_at: datetime | None = None
+    # [] sends the paper back to the whole course; None leaves it alone.
+    target_student_ids: list[str] | None = Field(None, max_length=1000)
     # Explicit clears, because None already means "leave it alone".
     untimed: bool = False
     clear_window: bool = False
@@ -136,7 +141,7 @@ class MarkUpdate(BaseModel):
 
 
 class ExtraTimeUpdate(BaseModel):
-    extra_time_percent: int = Field(..., ge=0, le=200)
+    extra_time_minutes: int = Field(..., ge=0, le=600)
 
 
 # ── Pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -186,14 +191,26 @@ def grade_objective(question_type: str, correct_answer: str, answer: str) -> boo
     return False
 
 
-def effective_minutes(time_limit_minutes: int | None, extra_time_percent: int) -> float | None:
+def shuffled_options(options: list[str], *seed_parts: str) -> list[str]:
+    """MCQ options in an order of their own for each student and question.
+
+    Seeded, not random: reopening the paper must show the same order, or a
+    student's remembered "it was the second one" is wrong. Marking compares
+    option TEXT, so the order never touches the mark.
+    """
+    out = list(options)
+    random.Random("|".join(seed_parts)).shuffle(out)
+    return out
+
+
+def effective_minutes(time_limit_minutes: int | None, extra_time_minutes: int) -> float | None:
     if not time_limit_minutes:
         return None
-    return time_limit_minutes * (1 + max(0, extra_time_percent) / 100)
+    return time_limit_minutes + max(0, extra_time_minutes)
 
 
-def deadline_for(started_at: datetime, time_limit_minutes: int | None, extra_time_percent: int) -> datetime | None:
-    minutes = effective_minutes(time_limit_minutes, extra_time_percent)
+def deadline_for(started_at: datetime, time_limit_minutes: int | None, extra_time_minutes: int) -> datetime | None:
+    minutes = effective_minutes(time_limit_minutes, extra_time_minutes)
     return started_at + timedelta(minutes=minutes) if minutes else None
 
 
@@ -273,12 +290,12 @@ def _ts(value: Any) -> datetime | None:
 def _extra_time(course_id: str, student_id: str) -> int:
     try:
         rows = (
-            get_supabase().table("enrolments").select("extra_time_percent")
+            get_supabase().table("enrolments").select("extra_time_minutes")
             .eq("course_id", course_id).eq("student_id", student_id).limit(1).execute().data
         )
-    except Exception:  # noqa: BLE001 — sql/016 not applied: nobody has an accommodation yet
+    except Exception:  # noqa: BLE001 — sql/022 not applied: nobody has an accommodation yet
         return 0
-    return int((rows[0].get("extra_time_percent") if rows else 0) or 0)
+    return int((rows[0].get("extra_time_minutes") if rows else 0) or 0)
 
 
 def _load(assessment_id: str) -> dict:
@@ -302,6 +319,24 @@ def visible_to(assessment: dict, student_id: str) -> bool:
     """
     targets = assessment.get("target_student_ids")
     return not targets or student_id in targets
+
+
+def _enrolled_targets(course_id: str, student_ids: list[str]) -> list[str]:
+    """The chosen students, refusing anyone not on the course.
+
+    A stray id would otherwise make a paper nobody on the course can see,
+    which looks like a publishing bug rather than a typo.
+    """
+    wanted = list(dict.fromkeys(student_ids))
+    if not wanted:
+        return []
+    rows = get_supabase().table("enrolments").select("student_id").eq(
+        "course_id", course_id
+    ).in_("student_id", wanted).execute().data or []
+    enrolled = {r["student_id"] for r in rows}
+    if missing := [s for s in wanted if s not in enrolled]:
+        raise HTTPException(status_code=400, detail=f"{len(missing)} chosen student(s) are not enrolled on this course.")
+    return wanted
 
 
 def _load_published_for_student(assessment_id: str, user: dict) -> dict:
@@ -437,6 +472,10 @@ async def suggest_mark(question: dict, answer: str) -> tuple[float, str, bool]:
 def create_assessment(payload: AssessmentCreate, request: Request, user=Depends(lecturer_guard)):
     assert_course_owner(user, payload.course_id)
     row = payload.model_dump(mode="json", exclude_none=True)
+    if not row.get("target_student_ids"):
+        row.pop("target_student_ids", None)
+    else:
+        row["target_student_ids"] = _enrolled_targets(payload.course_id, row["target_student_ids"])
     created = _insert("assessments", {**row, "created_by": user["id"]})
     if not created:
         raise HTTPException(status_code=500, detail="Failed to create assessment")
@@ -480,6 +519,10 @@ def update_assessment(
     if payload.clear_window:
         update["opens_at"] = None
         update["closes_at"] = None
+    if payload.target_student_ids is not None:
+        update["target_student_ids"] = (
+            _enrolled_targets(assessment["course_id"], payload.target_student_ids) or None
+        )
     if not update:
         return {"status": "ok", "assessment": assessment}
 
@@ -1022,7 +1065,7 @@ def learning_gain(course_id: str, user=Depends(lecturer_guard)):
 def list_accommodations(course_id: str, user=Depends(lecturer_guard)):
     assert_course_owner(user, course_id)
     try:
-        rows = get_supabase().table("enrolments").select("student_id, extra_time_percent, status").eq(
+        rows = get_supabase().table("enrolments").select("student_id, extra_time_minutes, status").eq(
             "course_id", course_id
         ).execute().data or []
     except Exception as exc:  # noqa: BLE001
@@ -1035,7 +1078,7 @@ def list_accommodations(course_id: str, user=Depends(lecturer_guard)):
                 {
                     "student_id": r["student_id"],
                     **names.get(r["student_id"], {"name": None, "email": None}),
-                    "extra_time_percent": int(r.get("extra_time_percent") or 0),
+                    "extra_time_minutes": int(r.get("extra_time_minutes") or 0),
                 }
                 for r in rows
             ),
@@ -1052,7 +1095,7 @@ def set_extra_time(
     assert_course_owner(user, course_id)
     try:
         rows = get_supabase().table("enrolments").update(
-            {"extra_time_percent": payload.extra_time_percent}
+            {"extra_time_minutes": payload.extra_time_minutes}
         ).eq("course_id", course_id).eq("student_id", student_id).execute().data
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=_MIGRATION_HINT) from exc
@@ -1061,9 +1104,9 @@ def set_extra_time(
     audit.record(
         actor=user, action="enrolment.extra_time", resource_type="enrolment",
         resource_id=student_id, course_id=course_id,
-        new_values={"extra_time_percent": payload.extra_time_percent}, request=request,
+        new_values={"extra_time_minutes": payload.extra_time_minutes}, request=request,
     )
-    return {"status": "ok", "student_id": student_id, "extra_time_percent": payload.extra_time_percent}
+    return {"status": "ok", "student_id": student_id, "extra_time_minutes": payload.extra_time_minutes}
 
 
 # ── Student ─────────────────────────────────────────────────────────────────
@@ -1084,7 +1127,7 @@ def available(course_id: str, user=Depends(auth_guard)):
         if r["kind"] in EXAM_KINDS and visible_to(r, user["id"])
     ]
     if not rows:
-        return {"assessments": [], "extra_time_percent": 0}
+        return {"assessments": [], "extra_time_minutes": 0}
 
     ids = [r["id"] for r in rows]
     done = {
@@ -1098,7 +1141,7 @@ def available(course_id: str, user=Depends(auth_guard)):
     extra = _extra_time(course_id, user["id"])
 
     return {
-        "extra_time_percent": extra,
+        "extra_time_minutes": extra,
         "assessments": [
             {
                 "id": r["id"], "kind": r["kind"], "title": r["title"],
@@ -1154,6 +1197,9 @@ def take(assessment_id: str, user=Depends(auth_guard)):
         # never fetched, so it cannot leak through a logging or error path.
         "id, order_index, prompt, options, topic, points, question_type"
     ).eq("assessment_id", assessment_id).order("order_index").execute().data or []
+    for q in questions:
+        if q.get("options"):
+            q["options"] = shuffled_options(q["options"], assessment_id, user["id"], q["id"])
 
     return {
         "assessment": {

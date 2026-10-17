@@ -362,6 +362,34 @@ def delete_asset(asset_id: str, user=Depends(lecturer_guard)):
     return {"status": "ok", "asset_id": asset_id}
 
 
+@router.get("/watch/{course_id}/{document_id}")
+def watch_video_source(course_id: str, document_id: str, t: int = 0, user=Depends(auth_guard)):
+    """Student-facing: a lecture video cited as a source, opened at second ``t``.
+
+    Only a published, live document on a course the student is enrolled on —
+    the same bar a passage has to clear to be cited in the first place.
+    """
+    from app.ai.ingestion.video import watch_url
+    from app.media.storage_service import COURSE_VIDEOS_BUCKET, signed_url
+
+    require_enrolment(user, course_id)
+    rows = (
+        get_supabase().table("documents")
+        .select("storage_path, media_url, is_published, deleted_at")
+        .eq("id", document_id).eq("course_id", course_id).execute().data
+    )
+    doc = rows[0] if rows else None
+    if not doc or not doc.get("is_published") or doc.get("deleted_at"):
+        raise HTTPException(status_code=404, detail="Video not found")
+    url = doc.get("media_url") or (
+        signed_url(COURSE_VIDEOS_BUCKET, doc["storage_path"], ttl_seconds=3 * 3600)
+        if doc.get("storage_path") else None
+    )
+    if not url:
+        raise HTTPException(status_code=404, detail="This source is not a video")
+    return {"url": watch_url(url, t)}
+
+
 @router.get("/concept/{course_id}/{concept_key}")
 def get_playable(course_id: str, concept_key: str, user=Depends(auth_guard)):
     """Student-facing: the approved video for a concept, if there is one.

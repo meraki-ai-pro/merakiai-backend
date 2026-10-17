@@ -651,6 +651,20 @@ def process_ingestion_task(
     return {"document_id": document_id, "status": "complete"}
 
 
+@shared_task
+def process_video_ingestion_task(
+    document_id: str, filename: str, course_id: str, default_mode: str, difficulty: str,
+):
+    """Transcribe and index a lecture video. Same queue as documents: it is the
+    same pipeline after the transcript, and the transcription itself is one
+    network call that ElevenLabs makes to fetch the media."""
+    from app.ai.ingestion.service import process_video_background
+
+    reset_async_supabase()
+    asyncio.run(process_video_background(document_id, filename, course_id, default_mode, difficulty))
+    return {"document_id": document_id, "status": "complete"}
+
+
 # Render tasks deliberately live in app/media/render/tasks.py, not here — see
 # the CELERY_INCLUDE note in app/core/celery_app.py. The API dispatches them by
 # name so it never imports manim.

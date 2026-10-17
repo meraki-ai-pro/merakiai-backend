@@ -1,6 +1,7 @@
 # app/ai/rag/modes_sessions/service.py
 import asyncio
 import json
+import random
 import re
 from typing import Any, Dict, List, Tuple, Optional, Callable, Awaitable
 
@@ -33,12 +34,15 @@ Return ONLY raw JSON (no markdown, no fences, no extra text) in this exact schem
   "difficulty": "<difficulty level>",
   "category": "<topic derived from reference>",
   "question": "<question text>",
-  "options": {"A": "...", "B": "...", "C": "...", "D": "..."}
+  "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
+  "correct": "<the letter of the ONE correct option>"
 }
 
 Rules:
 - Base ALL content ONLY on the REFERENCE MATERIAL in the user message.
-- Do NOT include the correct answer explicitly.
+- Exactly ONE option is correct according to the reference; "correct" names it.
+  The other three must be plausible but definitely wrong.
+- Do NOT reveal the answer in the question text.
 - Options must be clearly distinct.
 - Keep wording exam-like and concise.
 - Set "difficulty" to the level stated in the user message.
@@ -410,6 +414,41 @@ def asked_summary(item: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def shuffle_mcq(item: Dict[str, Any], rng: random.Random | None = None) -> Optional[Dict[str, Any]]:
+    """Check an MCQ's answer key, then shuffle its options.
+
+    The generator writes the right answer as option A far more often than
+    chance, which hands students a clue, so the order it chose is thrown away.
+    Returns None when the key does not name exactly one real, distinct option:
+    such a question has no correct answer among its choices.
+    """
+    opts = item.get("options")
+    if not isinstance(opts, dict) or not 2 <= len(opts) <= 6:
+        return None
+    opts = {str(k).strip().upper(): str(v).strip() for k, v in opts.items()}
+    correct = str(item.get("correct") or "").strip().strip("().").upper()
+    texts = list(opts.values())
+    if correct not in opts or not all(texts) or len(set(texts)) != len(texts):
+        return None
+    answer = opts[correct]
+    (rng or random).shuffle(texts)
+    letters = "ABCDEF"[: len(texts)]
+    return {**item, "options": dict(zip(letters, texts)), "correct": letters[texts.index(answer)]}
+
+
+def mcq_choice(student_answer: str, options: Dict[str, str]) -> Optional[str]:
+    """The option letter a student picked: "B", "b)", "(B) 42" or the option text."""
+    answer = student_answer.strip()
+    for letter, text in options.items():
+        if text.lower() == answer.lower():
+            return letter
+    # A lone letter, not the first letter of a word: "B" / "b)" yes, "because" no.
+    m = re.match(r"^\(?([A-Fa-f])(?![A-Za-z])", answer)
+    if m and m.group(1).upper() in options:
+        return m.group(1).upper()
+    return None
+
+
 def _already_asked_block(asked: List[Dict[str, Any]]) -> str:
     """Tell the generator what it has already used this session.
 
@@ -521,17 +560,23 @@ async def generate_review_item(
 
     if session_type == "mcq":
         sys_parts = _make_system(_SYS_MCQ)
-        raw = await generate_response(prompt=user_ctx, mode="review_generation", system_parts=sys_parts)
-        item = await safe_parse_json_with_retry(
-            raw,
-            regenerate_json_fn=lambda: generate_response(
-                prompt=user_ctx + _retry_suffix,
-                mode="review_generation",
-                system_parts=sys_parts,
-            ),
-            label="review_mcq",
-        )
-        return _finish(item), contexts
+        # A question whose key names no option is unanswerable, so it is
+        # regenerated rather than shown; two misses in a row is a real failure.
+        for attempt in range(2):
+            raw = await generate_response(prompt=user_ctx, mode="review_generation", system_parts=sys_parts)
+            item = await safe_parse_json_with_retry(
+                raw,
+                regenerate_json_fn=lambda: generate_response(
+                    prompt=user_ctx + _retry_suffix,
+                    mode="review_generation",
+                    system_parts=sys_parts,
+                ),
+                label="review_mcq",
+            )
+            keyed = shuffle_mcq(item)
+            if keyed:
+                return _finish(keyed), contexts
+        raise ValueError("MCQ generator returned no valid answer key twice")
 
     if session_type == "fill_blank":
         sys_parts = _make_system(_SYS_FILL_BLANK)
@@ -667,6 +712,33 @@ async def evaluate_review_answer(
             result["score"] = max(float(result.get("score", 0.5)), 0.5)
 
         result["correct_answer"] = correct_label
+        return result
+
+    # ── MCQ with a key: right/wrong is a letter comparison; LLM writes feedback ──
+    if itype == "mcq" and item.get("correct") in (item.get("options") or {}):
+        correct = item["correct"]
+        correct_text = f"{correct}) {item['options'][correct]}"
+        picked = mcq_choice(student_answer, item["options"])
+        user_msg = (
+            f"Course: {course_name}\n"
+            f"Item Type: mcq\n\n"
+            f"Prompt/Question:\n{qblock}\n\n"
+            f"Correct answer: {correct_text}\n\n"
+            f"Student Answer:\n{student_answer}\n\n"
+            f"REFERENCE MATERIAL:\n{reference}"
+            + known
+            + f"\n\nNote: the student's choice is {'CORRECT' if picked == correct else 'INCORRECT'}."
+        )
+        raw = await generate_response(
+            prompt=user_msg, mode="review", system_parts=_make_system(_SYS_REVIEW_EVAL)
+        )
+        result = await safe_parse_json_with_retry(raw, label="review_evaluation_mcq")
+        if picked == correct:
+            result["verdict"], result["score"] = "correct", max(float(result.get("score") or 0), 0.9)
+            result["misconception"] = ""
+        else:
+            result["verdict"], result["score"] = "incorrect", min(float(result.get("score") or 0), 0.2)
+        result["correct_answer"] = correct_text
         return result
 
     expected_points = item.get("expected_points", [])
