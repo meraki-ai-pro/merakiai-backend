@@ -135,6 +135,15 @@ class Submission(BaseModel):
     answers: list[SubmissionItem] = Field(..., min_length=1)
 
 
+# What the sitting page reports. Recorded for the lecturer; never auto-penalised:
+# a phone notification or a flaky screen can trip any of these innocently.
+IntegrityKind = Literal["left_window", "exited_fullscreen", "paste", "copy"]
+
+
+class IntegrityEvent(BaseModel):
+    kind: IntegrityKind
+
+
 class MarkUpdate(BaseModel):
     score: float = Field(..., ge=0)
     feedback: str | None = Field(None, max_length=2000)
@@ -191,7 +200,7 @@ def grade_objective(question_type: str, correct_answer: str, answer: str) -> boo
     return False
 
 
-def shuffled_options(options: list[str], *seed_parts: str) -> list[str]:
+def shuffled_options(options: list, *seed_parts: str) -> list:
     """MCQ options in an order of their own for each student and question.
 
     Seeded, not random: reopening the paper must show the same order, or a
@@ -626,6 +635,28 @@ def add_questions(
     return {"status": "ok", "added": len(created)}
 
 
+@router.put("/{assessment_id}/questions/{question_id}")
+def update_question(
+    assessment_id: str, question_id: str, payload: QuestionCreate, request: Request,
+    user=Depends(lecturer_guard),
+):
+    """Replace a question — prompt, options, answer, points — while the paper
+    is still a draft. Validated exactly like a new one."""
+    assessment = _load_owned(assessment_id, user)
+    _require_draft(assessment)
+    fields = payload.model_dump(exclude={"order_index"})
+    rows = get_supabase().table("assessment_questions").update(fields).eq("id", question_id).eq(
+        "assessment_id", assessment_id
+    ).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Question not found on this paper")
+    audit.record(
+        actor=user, action="assessment.question_edit", resource_type="assessment",
+        resource_id=assessment_id, course_id=assessment["course_id"], request=request,
+    )
+    return {"status": "ok", "question": rows[0]}
+
+
 @router.delete("/{assessment_id}/questions/{question_id}")
 def delete_question(assessment_id: str, question_id: str, user=Depends(lecturer_guard)):
     assessment = _load_owned(assessment_id, user)
@@ -699,6 +730,15 @@ def results(assessment_id: str, user=Depends(lecturer_guard)):
         "assessment_id", assessment_id
     ).execute().data or []
     total_points, by_student = tally(questions, attempts)
+    try:
+        integrity = {
+            r["student_id"]: integrity_summary(r.get("integrity_events"))
+            for r in sb.table("assessment_starts").select("student_id, integrity_events").eq(
+                "assessment_id", assessment_id
+            ).execute().data or []
+        }
+    except Exception:  # noqa: BLE001 — sql/025 not applied
+        integrity = {}
 
     names = _names(list(by_student))
     return {
@@ -715,6 +755,7 @@ def results(assessment_id: str, user=Depends(lecturer_guard)):
                 "score": row["score"],
                 "percent": round(100 * row["score"] / total_points, 1),
                 "pending_review": row["pending"],
+                "integrity": integrity.get(sid, {}),
             }
             for sid, row in sorted(by_student.items(), key=lambda x: -x[1]["score"])
         ],
@@ -1197,6 +1238,9 @@ def take(assessment_id: str, user=Depends(auth_guard)):
         # never fetched, so it cannot leak through a logging or error path.
         "id, order_index, prompt, options, topic, points, question_type"
     ).eq("assessment_id", assessment_id).order("order_index").execute().data or []
+    # Each student meets the questions, and each question's options, in an
+    # order of their own: neighbours cannot copy "question 4, answer B".
+    questions = shuffled_options(questions, assessment_id, user["id"])
     for q in questions:
         if q.get("options"):
             q["options"] = shuffled_options(q["options"], assessment_id, user["id"], q["id"])
@@ -1245,6 +1289,33 @@ def _prepare_submission(assessment_id: str, user: dict) -> tuple[dict, list[dict
         "assessment_id", assessment_id
     ).execute().data or []
     return assessment, questions
+
+
+@router.post("/{assessment_id}/integrity")
+def record_integrity_event(assessment_id: str, payload: IntegrityEvent, user=Depends(auth_guard)):
+    """Note something the lecturer should see next to this sitting's marks."""
+    _load_published_for_student(assessment_id, user)
+    sb = get_supabase()
+    rows = sb.table("assessment_starts").select("integrity_events").eq(
+        "assessment_id", assessment_id
+    ).eq("student_id", user["id"]).execute().data
+    if not rows:
+        return {"status": "ignored"}  # untimed papers have no sitting row
+    events = list(rows[0].get("integrity_events") or [])
+    if len(events) < 500:  # a page stuck in a loop must not grow the row for ever
+        events.append({"kind": payload.kind, "at": _now().isoformat()})
+        sb.table("assessment_starts").update({"integrity_events": events}).eq(
+            "assessment_id", assessment_id
+        ).eq("student_id", user["id"]).execute()
+    return {"status": "ok"}
+
+
+def integrity_summary(events: list[dict]) -> dict[str, int]:
+    """{"left_window": 3, "paste": 1} — what the results table shows."""
+    out: dict[str, int] = {}
+    for e in events or []:
+        out[e.get("kind", "?")] = out.get(e.get("kind", "?"), 0) + 1
+    return out
 
 
 @router.post("/{assessment_id}/submit")

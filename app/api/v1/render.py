@@ -23,7 +23,7 @@ from app.media.render.routing import (
     known_archetypes,
     render_queue,
 )
-from app.media.render.service import playable_asset, request_render
+from app.media.render.service import playable_asset, request_render, video_library
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +388,32 @@ def watch_video_source(course_id: str, document_id: str, t: int = 0, user=Depend
     if not url:
         raise HTTPException(status_code=404, detail="This source is not a video")
     return {"url": watch_url(url, t)}
+
+
+@router.get("/library/{course_id}")
+def get_video_library(course_id: str, user=Depends(auth_guard)):
+    """Student-facing: every approved concept video on the course (Manim and
+    Remotion alike), so a student can watch them outside an answer."""
+    require_enrolment(user, course_id)
+    from app.ai.ingestion.video import VIDEO_CONTENT_TYPES
+
+    # Lecture videos the lecturer added as course material (sql/023), opened
+    # through /render/watch like a cited one.
+    docs = (
+        get_supabase().table("documents")
+        .select("id, title, source_filename, media_url, created_at, deleted_at")
+        .eq("course_id", course_id).eq("is_published", True).eq("status", "ready")
+        .order("created_at", desc=True).execute().data or []
+    )
+    lectures = [
+        {"document_id": d["id"], "title": d["title"] or d["source_filename"]}
+        for d in docs
+        if not d.get("deleted_at") and (
+            d.get("media_url")
+            or (d.get("source_filename") or "").rsplit(".", 1)[-1].lower() in VIDEO_CONTENT_TYPES
+        )
+    ]
+    return {"videos": video_library(course_id), "lectures": lectures}
 
 
 @router.get("/concept/{course_id}/{concept_key}")

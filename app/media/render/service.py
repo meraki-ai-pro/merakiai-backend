@@ -332,6 +332,28 @@ def approved_concepts(course_id: str) -> list[tuple[str, str]]:
 _PLAYABLE_COLUMNS = "id, concept_key, storage_path, duration_seconds, archetype, renderer"
 
 
+def video_library(course_id: str) -> list[dict]:
+    """Every approved concept video on the course, newest approval per concept,
+    for the student's Videos page. Same bar as an inline ``::: video``."""
+    rows = (
+        get_supabase().table("media_assets")
+        .select(f"{_PLAYABLE_COLUMNS}, topic, approved_at")
+        .eq("course_id", course_id).eq("status", "ready")
+        .not_.is_("approved_at", "null")
+        .order("approved_at", desc=True).execute().data or []
+    )
+    seen: set[str] = set()
+    out = []
+    for asset in rows:
+        if asset["concept_key"] in seen:
+            continue
+        seen.add(asset["concept_key"])
+        url = signed_url(RENDERED_MEDIA_BUCKET, asset.get("storage_path"), _PLAYBACK_URL_TTL)
+        if url:
+            out.append({k: asset.get(k) for k in ("id", "concept_key", "topic", "duration_seconds", "approved_at")} | {"url": url})
+    return sorted(out, key=lambda a: ((a["topic"] or a["concept_key"]).lower()))
+
+
 def playable_asset(course_id: str, concept_key: str) -> dict | None:
     """The approved video for a concept, with a playback URL. None if there
     is not one — the caller falls back to the Lesson Board."""

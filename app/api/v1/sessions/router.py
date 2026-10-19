@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core import assignments
 from app.core.auth import auth_guard
 from app.core.enrolment import (
     PARTICIPATING_STATUSES,
@@ -236,6 +237,7 @@ def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
     # Starting a session is new work, so a completed enrolment is not enough.
     require_enrolment(user, payload.course_id, PARTICIPATING_STATUSES)
     require_mode_enabled(payload.course_id, mode)
+    assignments.require_unlocked(user["id"], payload.course_id)
 
     ins = supabase.table("sessions").insert({
         "user_id": user["id"],
@@ -256,6 +258,15 @@ def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
         "prefers_video": row["prefers_video"],
         "started_at": row.get("started_at"),
     }
+
+
+@router.get("/activities/{course_id}")
+def list_activities(course_id: str, user=Depends(auth_guard)):
+    """What the lecturer has assigned this student on the course (Intervention
+    Studio), and whether an unfinished required one locks other study."""
+    require_enrolment(user, course_id)
+    items = assignments.for_student(user["id"], course_id)
+    return {"activities": items, "locked": bool(assignments.blocking(user["id"], course_id))}
 
 
 @router.get("/{session_id}")
@@ -375,8 +386,11 @@ def get_conversations(
 
     # Verify the session exists and belongs to this user (RLS filters by ownership,
     # but we want a clean 404 rather than an empty conversations list on bad IDs).
-    if not supabase.table("sessions").select("id").eq("id", sid).execute().data:
+    owned = supabase.table("sessions").select("id, course_id").eq("id", sid).execute().data
+    if not owned:
         raise HTTPException(status_code=404, detail="Session not found")
+    # Reopening an old session is locked while a required activity waits.
+    assignments.require_unlocked(user["id"], owned[0]["course_id"], sid)
 
     columns = (
         "id,mode,user_input,tutor_response,response_format,"

@@ -52,3 +52,21 @@ def test_exam_options_are_stable_per_student_and_differ_between_students():
     assert sorted(a) == sorted(opts)
     orders = {tuple(shuffled_options(opts, "exam", f"s{i}", "q1")) for i in range(30)}
     assert len(orders) > 5
+
+
+def test_question_order_is_per_student_and_keeps_every_question():
+    from app.api.v1.assessments import shuffled_options
+
+    questions = [{"id": f"q{i}"} for i in range(10)]
+    a = shuffled_options(questions, "exam", "student-a")
+    assert a == shuffled_options(questions, "exam", "student-a")  # reopening keeps the order
+    assert sorted(q["id"] for q in a) == sorted(q["id"] for q in questions)
+    assert a != shuffled_options(questions, "exam", "student-b")
+
+
+def test_integrity_summary_counts_by_kind():
+    from app.api.v1.assessments import integrity_summary
+
+    events = [{"kind": "left_window"}, {"kind": "paste"}, {"kind": "left_window"}]
+    assert integrity_summary(events) == {"left_window": 2, "paste": 1}
+    assert integrity_summary([]) == {}

@@ -57,6 +57,8 @@ class Focus(BaseModel):
 class PracticeRequest(Focus):
     format: Format = "practice"
     question_count: int | None = Field(None, ge=2, le=15)
+    # Students must finish it before other study on the course (once published).
+    required: bool = True
 
 
 class LessonSend(BaseModel):
@@ -65,9 +67,25 @@ class LessonSend(BaseModel):
     # Empty = everyone actively enrolled (a whole-class lesson).
     student_ids: list[str] = Field(default_factory=list, max_length=500)
     sources: list[dict] | None = None
+    # Students must reply to it before other study on the course.
+    required: bool = True
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _record_assignments(rows: list[dict]) -> None:
+    """List the activity in each student's Activities tab (sql/025).
+
+    Best-effort: without the table the lesson or paper still reaches the
+    students — it just is not listed, and locks nothing.
+    """
+    if not rows:
+        return
+    try:
+        get_supabase().table("student_assignments").insert(rows).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not record assignments (apply sql/025): %s", exc)
+
 
 def _active_students(course_id: str, student_ids: list[str]) -> list[str]:
     """The requested students who are actively enrolled; the rest are dropped.
@@ -260,6 +278,16 @@ async def create_practice(
     sb.table("assessment_questions").insert([
         {**q, "assessment_id": assessment["id"], "order_index": i} for i, q in enumerate(questions)
     ]).execute()
+    # Listed (and locking) only once the lecturer publishes the draft.
+    recipients = students or [
+        r["student_id"] for r in sb.table("enrolments").select("student_id")
+        .eq("course_id", course_id).eq("status", "active").execute().data or []
+    ]
+    _record_assignments([
+        {"course_id": course_id, "student_id": sid, "kind": "paper", "assessment_id": assessment["id"],
+         "title": row["title"], "required": payload.required, "assigned_by": user["id"]}
+        for sid in recipients
+    ])
 
     audit.record(
         actor=user, action="intervention.practice", resource_type="assessment",
@@ -330,6 +358,7 @@ def send_mini_lesson(
     now = datetime.now(timezone.utc).isoformat()
     title = f"From your lecturer: {payload.topic}"[:120]
     sent = 0
+    assigned = []
     for sid in students:
         try:
             session = sb.table("sessions").insert({
@@ -345,9 +374,15 @@ def send_mini_lesson(
             if payload.sources:
                 row["sources"] = payload.sources
             sb.table("conversations").insert(row).execute()
+            assigned.append({
+                "course_id": course_id, "student_id": sid, "kind": "lesson", "session_id": session["id"],
+                "title": title, "required": payload.required, "assigned_by": user["id"],
+            })
             sent += 1
         except Exception as exc:  # noqa: BLE001 — one student's failure must not stop the rest
             logger.warning("Mini-lesson to %s failed: %s", sid, exc)
+
+    _record_assignments(assigned)
 
     audit.record(
         actor=user, action="intervention.mini_lesson", resource_type="course",

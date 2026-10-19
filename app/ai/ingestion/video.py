@@ -15,6 +15,7 @@ passes through the API or the worker.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from typing import Any, Dict, Iterable, List
 
@@ -89,15 +90,24 @@ async def transcribe(*, file_url: str | None = None, link: str | None = None) ->
     """Word-level transcript of a video, fetched by ElevenLabs from the URL."""
     from app.media.tts_service import _get_eleven
 
-    kwargs = {"cloud_storage_url": file_url} if file_url else {"source_url": link}
+    source_url = file_url or link
+    if not source_url or bool(file_url) == bool(link):
+        raise ValueError("Provide exactly one video URL to transcribe.")
+
+    # ``cloud_storage_url`` is deprecated in the current ElevenLabs API.
+    # ``source_url`` accepts both signed object-storage URLs and hosted pages
+    # such as YouTube, so one code path serves uploads and links.
     result = await asyncio.to_thread(
         _get_eleven().speech_to_text.convert,
-        model_id="scribe_v1",
+        model_id=os.getenv("ELEVENLABS_STT_MODEL_ID", "scribe_v2"),
         timestamps_granularity="word",
         tag_audio_events=False,
-        **kwargs,
+        source_url=source_url,
     )
-    return [w.model_dump() if hasattr(w, "model_dump") else dict(w) for w in (result.words or [])]
+    words = [w.model_dump() if hasattr(w, "model_dump") else dict(w) for w in (result.words or [])]
+    if not words:
+        raise RuntimeError("The video transcription returned no spoken words.")
+    return words
 
 
 def watch_url(media_url: str, start_seconds: int) -> str:

@@ -80,7 +80,7 @@ class TestQuery(BaseModel):
 _LIST_COLUMNS = (
     "id, title, source_filename, doc_type, default_mode, target_modes, "
     "is_published, topic, difficulty, status, total_chunks, version, "
-    "storage_path, created_at"
+    "storage_path, media_url, created_at"
 )
 
 
@@ -271,10 +271,57 @@ def video_uploaded(course_id: str, document_id: str, user=Depends(lecturer_guard
 def _queue_video(doc: dict) -> None:
     from app.ai.tasks import process_video_ingestion_task
 
-    process_video_ingestion_task.apply_async(
-        args=[doc["id"], doc["source_filename"], doc["course_id"], doc["default_mode"], doc["difficulty"]],
-        queue="ingestion_tasks",
+    try:
+        process_video_ingestion_task.apply_async(
+            args=[doc["id"], doc["source_filename"], doc["course_id"], doc["default_mode"], doc["difficulty"]],
+            queue="ingestion_tasks",
+            routing_key="ingestion",
+        )
+    except Exception as exc:  # noqa: BLE001 — broker availability is external
+        logger.exception("Could not queue video ingestion for %s", doc["id"])
+        get_supabase().table("documents").update({"status": "failed"}).eq(
+            "id", doc["id"]
+        ).execute()
+        raise HTTPException(
+            status_code=503,
+            detail="The video was saved, but transcription could not be queued. Retry it shortly.",
+        ) from exc
+
+
+@router.post("/{document_id}/retry-video")
+def retry_video(course_id: str, document_id: str, user=Depends(lecturer_guard)):
+    """Requeue a failed or stale lecture-video transcription.
+
+    Jobs can be lost when the broker or ingestion worker is unavailable during
+    a deployment. Keeping an explicit retry makes that recoverable without
+    deleting and re-adding a large upload or hosted link.
+    """
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+    rows = (
+        sb.table("documents")
+        .select(
+            "id, source_filename, course_id, default_mode, difficulty, "
+            "storage_path, media_url"
+        )
+        .eq("id", document_id)
+        .eq("course_id", course_id)
+        .execute()
+        .data
+        or []
     )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Document not found on this course")
+
+    doc = rows[0]
+    if not doc.get("media_url") and not doc.get("storage_path"):
+        raise HTTPException(status_code=409, detail="This document has no video to transcribe")
+
+    sb.table("documents").update({"status": "processing", "total_chunks": 0}).eq(
+        "id", document_id
+    ).execute()
+    _queue_video(doc)
+    return {"document_id": document_id, "status": "processing"}
 
 
 @router.patch("/{document_id}")

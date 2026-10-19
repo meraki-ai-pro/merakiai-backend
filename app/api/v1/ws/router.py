@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPAuthorizationCredentials
 
+from app.core import assignments
 from app.core.auth import _validate_token
 from app.core.websocket_manager import manager
 from app.core import analytics
@@ -184,6 +185,13 @@ async def websocket_endpoint(
                 continue
 
             msg_type: str = data.get("type", "")
+
+            # A required activity from the lecturer locks every session but its own.
+            if msg_type in ("rag_turn", "mode_session_start", "mode_session_turn"):
+                locked = await asyncio.to_thread(assignments.lock_message_for_session, user_id, session_id)
+                if locked:
+                    await websocket.send_json({"error": locked, "locked": True})
+                    continue
 
             # ---------------------------------------------------------------
             # rag_turn — Learn mode question (text or video response)

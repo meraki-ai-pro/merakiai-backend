@@ -1,8 +1,12 @@
 """Lecture videos: transcript -> timed sections -> the chunker, and watch links."""
 
+import asyncio
+from types import SimpleNamespace
+
 from app.ai.ingestion.math_parser import HEADING, PARAGRAPH
 from app.ai.ingestion.structured_chunker import build_chunks
-from app.ai.ingestion.video import clock, transcript_blocks, watch_url
+from app.ai.ingestion.video import clock, transcribe, transcript_blocks, watch_url
+from app.core.celery_app import celery_app
 
 
 def _words(n: int, step: float = 1.0):
@@ -44,3 +48,41 @@ def test_watch_links():
     assert watch_url("https://www.youtube.com/watch?v=abc", 125) == "https://www.youtube.com/watch?v=abc&t=125s"
     assert watch_url("https://youtu.be/abc", 5) == "https://youtu.be/abc?t=5s"
     assert watch_url("https://x.supabase.co/storage/v1/object/sign/v.mp4?token=t", 60).endswith("token=t#t=60")
+
+
+def test_video_ingestion_is_routed_to_the_dedicated_worker():
+    route = celery_app.conf.task_routes["app.ai.tasks.process_video_ingestion_task"]
+    assert route["queue"] == "ingestion_tasks"
+
+
+def test_transcribe_uses_source_url_for_signed_uploads(monkeypatch):
+    captured = {}
+
+    class SpeechToText:
+        def convert(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(words=[SimpleNamespace(model_dump=lambda: {"text": "hello"})])
+
+    client = SimpleNamespace(speech_to_text=SpeechToText())
+    monkeypatch.setattr("app.media.tts_service._get_eleven", lambda: client)
+
+    words = asyncio.run(transcribe(file_url="https://storage.example/video.mp4?token=one"))
+
+    assert words == [{"text": "hello"}]
+    assert captured["source_url"].startswith("https://storage.example/")
+    assert "cloud_storage_url" not in captured
+    assert captured["model_id"] == "scribe_v2"
+
+
+def test_transcribe_rejects_an_empty_transcript(monkeypatch):
+    client = SimpleNamespace(
+        speech_to_text=SimpleNamespace(convert=lambda **_kwargs: SimpleNamespace(words=[]))
+    )
+    monkeypatch.setattr("app.media.tts_service._get_eleven", lambda: client)
+
+    try:
+        asyncio.run(transcribe(link="https://youtube.com/watch?v=abc"))
+    except RuntimeError as exc:
+        assert "no spoken words" in str(exc)
+    else:
+        raise AssertionError("empty transcripts must fail instead of leaving unusable documents")

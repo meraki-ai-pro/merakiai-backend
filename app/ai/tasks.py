@@ -661,7 +661,19 @@ def process_video_ingestion_task(
     from app.ai.ingestion.service import process_video_background
 
     reset_async_supabase()
-    asyncio.run(process_video_background(document_id, filename, course_id, default_mode, difficulty))
+    try:
+        asyncio.run(process_video_background(document_id, filename, course_id, default_mode, difficulty))
+    except Exception as e:
+        # process_video_background records ordinary pipeline failures itself;
+        # this catches failures that happen before it can do so.
+        logger.exception("process_video_ingestion_task failed  doc=%s: %s", document_id, e)
+        try:
+            get_supabase().table("documents").update({"status": "failed"}).eq(
+                "id", document_id
+            ).execute()
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not record video ingestion failure for %s", document_id)
+        return {"document_id": document_id, "status": "failed"}
     return {"document_id": document_id, "status": "complete"}
 
 
