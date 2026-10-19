@@ -28,25 +28,10 @@ def auth_headers() -> dict:
 
 
 def poll_task(task_id: str, timeout: int = 60, interval: float = 2.0) -> dict:
-    """Poll /rag/status or /mode-sessions/status until done or timeout."""
+    """Poll /rag/status until done or timeout. It reads any Celery task, mode sessions included."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         r = httpx.get(f"{BASE_URL}/rag/status/{task_id}", headers=auth_headers(), timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("status") not in ("processing", "pending"):
-                return data
-        time.sleep(interval)
-    return {"status": "timeout"}
-
-
-def poll_mode_task(task_id: str, timeout: int = 60, interval: float = 2.0) -> dict:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        r = httpx.get(
-            f"{BASE_URL}/mode-sessions/status/{task_id}",
-            headers=auth_headers(), timeout=10
-        )
         if r.status_code == 200:
             data = r.json()
             if data.get("status") not in ("processing", "pending"):
@@ -310,7 +295,7 @@ def test_mode_session_start_poll():
     if "app_mode_task_id" not in _state:
         pytest.skip("No app_mode_task_id")
     print(f"\n[mode_start_poll] polling {_state['app_mode_task_id']} ...")
-    result = poll_mode_task(_state["app_mode_task_id"], timeout=90)
+    result = poll_task(_state["app_mode_task_id"], timeout=90)
     print(f"  status={result.get('status')} keys={list(result.keys())}")
     assert result.get("status") != "timeout", "Mode session start timed out"
     assert result.get("status") != "failed",  f"Mode session start failed: {result.get('error')}"
@@ -334,7 +319,7 @@ def test_mode_session_turn_poll():
     if "mode_turn_task_id" not in _state:
         pytest.skip("No mode_turn_task_id")
     print(f"\n[mode_turn_poll] polling {_state['mode_turn_task_id']} ...")
-    result = poll_mode_task(_state["mode_turn_task_id"], timeout=90)
+    result = poll_task(_state["mode_turn_task_id"], timeout=90)
     print(f"  status={result.get('status')} keys={list(result.keys())}")
     assert result.get("status") != "timeout", "Mode session turn timed out"
     assert result.get("status") != "failed",  f"Mode session turn failed: {result.get('error')}"
@@ -381,7 +366,7 @@ def test_mode_session_review_poll():
     if "rev_mode_task_id" not in _state:
         pytest.skip("No rev_mode_task_id")
     print(f"\n[mode_review_poll] polling {_state['rev_mode_task_id']} ...")
-    result = poll_mode_task(_state["rev_mode_task_id"], timeout=90)
+    result = poll_task(_state["rev_mode_task_id"], timeout=90)
     print(f"  status={result.get('status')} response={str(result)[:400]}")
     assert result.get("status") != "timeout", "Review mode session timed out"
     assert result.get("status") != "failed",  f"Review start failed: {result.get('error')}"
@@ -403,7 +388,7 @@ def test_mode_session_review_turn():
 def test_mode_session_review_turn_poll():
     if "rev_turn_task_id" not in _state:
         pytest.skip("No rev_turn_task_id")
-    result = poll_mode_task(_state["rev_turn_task_id"], timeout=90)
+    result = poll_task(_state["rev_turn_task_id"], timeout=90)
     print(f"\n[rev_turn_poll] status={result.get('status')} response={str(result)[:400]}")
     assert result.get("status") != "timeout"
     assert result.get("status") != "failed",  f"Review turn failed: {result.get('error')}"
@@ -796,7 +781,7 @@ def test_ws_mode_session_start_poll():
     if "ws_mode_task_id" not in _state:
         pytest.skip("No ws_mode_task_id")
     print(f"\n[ws_mode_start_poll] polling {_state['ws_mode_task_id']} ...")
-    result = poll_mode_task(_state["ws_mode_task_id"], timeout=90)
+    result = poll_task(_state["ws_mode_task_id"], timeout=90)
     print(f"  result={result}")
     # Accept failed status when OpenAI key is invalid (known issue) —
     # what we're testing is that the WS correctly dispatched the task.

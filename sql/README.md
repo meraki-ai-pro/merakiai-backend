@@ -37,6 +37,7 @@ set is safe.
 | 021 | drop_client_redeem_invite_code | Drops the old client-callable `redeem_invite_code` — **only after the backend using 020 is deployed** |
 | 022 | extra_time_minutes | `enrolments.extra_time_minutes` (exam accommodations in minutes; `extra_time_percent` is no longer read) |
 | 023 | course_video_sources | `course-videos` bucket, `documents.media_url` (lecture videos, uploaded or linked, as course sources) |
+| 024 | drop_extra_time_percent | Drops `enrolments.extra_time_percent` — **only after the backend using 022 is deployed** |
 
 ## Dependencies worth knowing
 
@@ -68,6 +69,8 @@ columns to `documents` and `media_assets`.
 breaks, but any policy written after 020 must call `private.is_admin()` (and
 `private.owns_course()`, etc.), not `public.…`. Re-running 003/004 would
 recreate unused public copies.
+
+**024 waits for a deploy.** The previous backend selects `extra_time_percent`.
 
 **021 waits for a deploy.** The previous backend calls `redeem_invite_code`
 with the student's JWT; dropping it first breaks "Join with an invite code".
