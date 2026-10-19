@@ -7,6 +7,7 @@ from app.ai.ingestion.math_parser import HEADING, PARAGRAPH
 from app.ai.ingestion.structured_chunker import build_chunks
 from app.ai.ingestion.video import clock, transcribe, transcript_blocks, watch_url
 from app.core.celery_app import celery_app
+from app.api.v1.render import _lecture_title
 
 
 def _words(n: int, step: float = 1.0):
@@ -48,6 +49,12 @@ def test_watch_links():
     assert watch_url("https://www.youtube.com/watch?v=abc", 125) == "https://www.youtube.com/watch?v=abc&t=125s"
     assert watch_url("https://youtu.be/abc", 5) == "https://youtu.be/abc?t=5s"
     assert watch_url("https://x.supabase.co/storage/v1/object/sign/v.mp4?token=t", 60).endswith("token=t#t=60")
+
+
+def test_lecture_title_never_exposes_a_hosted_url():
+    assert _lecture_title({"title": "Limits lecture"}) == "Limits lecture"
+    assert _lecture_title({"title": "https://youtube.com/watch?v=abc", "topic": "Limits"}) == "Limits"
+    assert _lecture_title({"source_filename": "https://youtu.be/abc"}) == "Lecture video"
 
 
 def test_video_ingestion_is_routed_to_the_dedicated_worker():

@@ -401,12 +401,12 @@ def get_video_library(course_id: str, user=Depends(auth_guard)):
     # through /render/watch like a cited one.
     docs = (
         get_supabase().table("documents")
-        .select("id, title, source_filename, media_url, created_at, deleted_at")
+        .select("id, title, source_filename, media_url, topic, created_at, deleted_at")
         .eq("course_id", course_id).eq("is_published", True).eq("status", "ready")
         .order("created_at", desc=True).execute().data or []
     )
     lectures = [
-        {"document_id": d["id"], "title": d["title"] or d["source_filename"]}
+        {"document_id": d["id"], "title": _lecture_title(d)}
         for d in docs
         if not d.get("deleted_at") and (
             d.get("media_url")
@@ -414,6 +414,15 @@ def get_video_library(course_id: str, user=Depends(auth_guard)):
         )
     ]
     return {"videos": video_library(course_id), "lectures": lectures}
+
+
+def _lecture_title(document: dict) -> str:
+    """A student-facing label that never leaks a hosted video's raw URL."""
+    title = str(document.get("title") or document.get("source_filename") or "").strip()
+    if title and not title.lower().startswith(("http://", "https://")):
+        return title
+    topic = str(document.get("topic") or "").strip()
+    return topic or "Lecture video"
 
 
 @router.get("/concept/{course_id}/{concept_key}")
