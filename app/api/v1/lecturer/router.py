@@ -9,6 +9,7 @@ from fastapi import APIRouter
 
 from app.api.v1.lecturer.analytics import router as analytics_router
 from app.api.v1.lecturer.courses import router as courses_router
+from app.api.v1.lecturer.data_center import router as data_center_router
 from app.api.v1.lecturer.interventions import router as interventions_router
 from app.api.v1.lecturer.knowledge import router as knowledge_router
 from app.api.v1.lecturer.students import router as students_router
@@ -21,6 +22,7 @@ router.include_router(courses_router)
 router.include_router(knowledge_router)
 router.include_router(students_router)
 router.include_router(analytics_router)
+router.include_router(data_center_router)
 router.include_router(interventions_router)
 router.include_router(voices_router)
 router.include_router(course_voice_router)
