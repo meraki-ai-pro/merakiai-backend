@@ -1,6 +1,7 @@
 import React from 'react';
 import { Composition } from 'remotion';
 import { Lesson } from './Lesson';
+import { INTRO_FPS, INTRO_SECONDS, Intro } from './Intro';
 import { CHART_SECONDS, DEFAULT_SPEC, FPS, STEP_SECONDS, TAIL_SECONDS, TITLE_SECONDS, type LessonSpec } from './types';
 
 /**
@@ -19,6 +20,7 @@ function durationInFrames(spec: LessonSpec): number {
 }
 
 export const RemotionRoot: React.FC = () => (
+  <>
   <Composition
     id="Lesson"
     component={Lesson}
@@ -32,4 +34,7 @@ export const RemotionRoot: React.FC = () => (
       fps: FPS,
     })}
   />
+  {/* Landing-page product intro (not part of the lesson pipeline). */}
+  <Composition id="Intro" component={Intro} durationInFrames={INTRO_FPS * INTRO_SECONDS} fps={INTRO_FPS} width={1280} height={720} />
+  </>
 );
