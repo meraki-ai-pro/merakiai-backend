@@ -222,6 +222,16 @@ def add_video(course_id: str, payload: VideoAdd, request: Request, user=Depends(
                 status_code=415,
                 detail=f"Unsupported video type '.{ext}'. Allowed: {', '.join(sorted(VIDEO_CONTENT_TYPES))}",
             )
+    if payload.link:
+        # The same link twice indexes the same lecture twice, and deleting one
+        # copy then looks like a delete that did not work: the other copy is
+        # still cited and still listed for students.
+        live = (
+            get_supabase().table("documents").select("id, deleted_at")
+            .eq("course_id", course_id).eq("media_url", payload.link).execute().data or []
+        )
+        if any(not d.get("deleted_at") for d in live):
+            raise HTTPException(status_code=409, detail="That video link is already on this course.")
     try:
         modes = parse_target_modes(",".join(payload.target_modes or []), payload.default_mode)
         doc = register_document(
@@ -388,17 +398,26 @@ def delete_knowledge(
 
     sb = get_supabase()
     before = (
-        sb.table("documents").select("id, title, is_published")
+        sb.table("documents").select("id, title, is_published, media_url, storage_path, source_filename")
         .eq("id", document_id).eq("course_id", course_id).execute().data
     )
     if not before:
         raise HTTPException(status_code=404, detail="Document not found on this course")
+    doc = before[0]
+    is_video = bool(doc.get("media_url")) or (
+        (doc.get("source_filename") or "").rsplit(".", 1)[-1].lower() in VIDEO_CONTENT_TYPES
+    )
 
-    sb.table("documents").update(
-        {"deleted_at": "now()", "is_published": False}
-    ).eq("id", document_id).execute()
+    update = {"deleted_at": "now()", "is_published": False}
+    if is_video:
+        # A deleted video must not survive anywhere: the link is cleared so no
+        # watch URL can be minted from it.
+        update["media_url"] = None
+    sb.table("documents").update(update).eq("id", document_id).execute()
 
     invalidate_visibility(course_id)
+    if is_video:
+        _purge_video(sb, doc)
 
     audit.record(
         actor=user, action="knowledge.delete", resource_type="document",
@@ -406,6 +425,35 @@ def delete_knowledge(
         old_values=before[0], request=request,
     )
     return {"status": "ok", "document_id": document_id, "deleted": True}
+
+
+def _purge_video(sb, doc: dict) -> None:
+    """Remove a deleted video's transcript vectors and uploaded file.
+
+    Best-effort and after the soft delete, which already hides it everywhere: a
+    Pinecone or storage hiccup leaves an orphan to clean later, never a live video.
+    """
+    from collections import defaultdict
+
+    from app.ai.ingestion.pinecone import delete_vectors
+
+    try:
+        chunks = sb.table("document_chunks").select("pinecone_id, pinecone_namespace").eq(
+            "document_id", doc["id"]
+        ).execute().data or []
+        by_namespace: dict[str, list[str]] = defaultdict(list)
+        for c in chunks:
+            by_namespace[c["pinecone_namespace"]].append(c["pinecone_id"])
+        for namespace, ids in by_namespace.items():
+            delete_vectors(ids, namespace)
+        sb.table("document_chunks").delete().eq("document_id", doc["id"]).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not purge vectors for deleted video %s: %s", doc["id"], exc)
+    if doc.get("storage_path") and not doc.get("media_url"):
+        try:
+            sb.storage.from_(COURSE_VIDEOS_BUCKET).remove([doc["storage_path"]])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not remove uploaded video %s: %s", doc["storage_path"], exc)
 
 
 @router.post("/test-query")
