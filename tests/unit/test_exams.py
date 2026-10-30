@@ -250,6 +250,13 @@ class TestExamResultsExport:
         assert stats["pass_rate"] == 50.0 and stats["pending_review"] == 1
         assert sum(b["students"] for b in stats["distribution"]) == 2
 
+    def test_an_instructor_pass_mark_moves_the_pass_rate(self):
+        total, by_student = exams.tally(self.QS, self.ATTEMPTS)  # students on 100% and 20%
+        assert exams.exam_stats(total, by_student, pass_mark=10)["pass_rate"] == 100.0
+        assert exams.exam_stats(total, by_student, pass_mark=100)["pass_rate"] == 50.0
+        assert exams.pass_mark_of({"pass_mark": None}) == 50.0
+        assert exams.pass_mark_of({"pass_mark": 40}) == 40.0
+
     def test_unsat_paper_has_no_invented_zeros(self):
         assert "mean_percent" not in exams.exam_stats(1.0, {})
 

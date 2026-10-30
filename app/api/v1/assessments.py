@@ -70,6 +70,8 @@ class AssessmentCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     instructions: str | None = None
     time_limit_minutes: int | None = Field(None, ge=1, le=600)
+    # Percentage needed to pass (sql/027). None = the default 50%.
+    pass_mark: float | None = Field(None, gt=0, le=100)
     opens_at: datetime | None = None
     closes_at: datetime | None = None
     # Only these students see the paper. Empty / omitted = the whole course.
@@ -86,6 +88,7 @@ class AssessmentUpdate(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=200)
     instructions: str | None = None
     time_limit_minutes: int | None = Field(None, ge=1, le=600)
+    pass_mark: float | None = Field(None, gt=0, le=100)
     opens_at: datetime | None = None
     closes_at: datetime | None = None
     # [] sends the paper back to the whole course; None leaves it alone.
@@ -778,16 +781,22 @@ def tally(questions: list[dict], attempts: list[dict]) -> tuple[float, dict[str,
     return total_points, by_student
 
 
-# Percentage bands for the score distribution, lowest first. 50 is the pass mark.
+# Percentage bands for the score distribution, lowest first.
 SCORE_BANDS = ((0, 50, "0–49"), (50, 60, "50–59"), (60, 70, "60–69"), (70, 80, "70–79"), (80, 101, "80–100"))
+# The pass mark when an instructor has not set one for the paper (sql/027).
 PASS_PERCENT = 50.0
 
 
-def exam_stats(total_points: float, by_student: dict[str, dict]) -> dict:
+def pass_mark_of(paper: dict) -> float:
+    return float(paper.get("pass_mark") or PASS_PERCENT)
+
+
+def exam_stats(total_points: float, by_student: dict[str, dict], pass_mark: float = PASS_PERCENT) -> dict:
     """Cohort figures for one paper. Only `responses` when nobody has sat it — never zeros."""
     percents = sorted(100 * r["score"] / total_points for r in by_student.values())
     if not percents:
-        return {"responses": 0, "pending_review": 0, "distribution": [{"band": b[2], "students": 0} for b in SCORE_BANDS]}
+        return {"responses": 0, "pending_review": 0, "pass_mark": pass_mark,
+                "distribution": [{"band": b[2], "students": 0} for b in SCORE_BANDS]}
     n, mid = len(percents), len(percents) // 2
     median = percents[mid] if n % 2 else (percents[mid - 1] + percents[mid]) / 2
     return {
@@ -796,7 +805,8 @@ def exam_stats(total_points: float, by_student: dict[str, dict]) -> dict:
         "median_percent": round(median, 1),
         "highest_percent": round(percents[-1], 1),
         "lowest_percent": round(percents[0], 1),
-        "pass_rate": round(100 * sum(p >= PASS_PERCENT for p in percents) / n, 1),
+        "pass_mark": pass_mark,
+        "pass_rate": round(100 * sum(p >= pass_mark for p in percents) / n, 1),
         "pending_review": sum(r["pending"] for r in by_student.values()),
         "distribution": [
             {"band": label, "students": sum(lo <= p < hi for p in percents)}
@@ -845,7 +855,7 @@ def exams_summary(course_id: str, user=Depends(lecturer_guard)):
                 "results_released": bool(d["paper"].get("results_released")),
                 "question_count": len(d["questions"]),
                 "total_points": d["total_points"],
-                **exam_stats(d["total_points"], d["by_student"]),
+                **exam_stats(d["total_points"], d["by_student"], pass_mark_of(d["paper"])),
             }
             for d in _course_exam_data(course_id)
         ]
@@ -872,19 +882,20 @@ def build_results_workbook(course_name: str, exams: list[dict], names: dict[str,
     summary["A1"].font = Font(bold=True, size=14)
     summary.append([])
     header = ["Exam", "Type", "Out of", "Students", "Mean %", "Median %", "Highest %", "Lowest %",
-              f"Pass rate (≥{PASS_PERCENT:g}%)", "Answers awaiting review", "Results released"]
+              "Pass mark %", "Pass rate %", "Answers awaiting review", "Results released"]
     summary.append(header)
     for cell in summary[3]:
         cell.font = bold
 
     used: set[str] = {"Summary"}
     for d in exams:
-        paper, stats = d["paper"], exam_stats(d["total_points"], d["by_student"])
+        paper = d["paper"]
+        stats = exam_stats(d["total_points"], d["by_student"], pass_mark_of(paper))
         summary.append([
             paper["title"], _KIND_LABELS.get(paper["kind"], paper["kind"]), d["total_points"],
             stats["responses"], stats.get("mean_percent"), stats.get("median_percent"),
             stats.get("highest_percent"), stats.get("lowest_percent"),
-            stats.get("pass_rate"), stats["pending_review"],
+            stats["pass_mark"], stats.get("pass_rate"), stats["pending_review"],
             "Yes" if paper.get("results_released") else "No",
         ])
 
