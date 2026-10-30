@@ -63,11 +63,21 @@ def _in_batches(ids: list[str], fn: Callable[[list[str]], list[dict]], size: int
 
 
 def _people(sb, ids: set[str]) -> dict[str, dict]:
+    """Display details for these users, with soft-deleted accounts marked.
+
+    A deleted student (app/core/lifecycle.py) is waiting to be purged; their
+    rows must not leave the system in a download meanwhile. See _live().
+    """
     if not ids:
         return {}
     rows = _in_batches(sorted(ids), lambda b: sb.table("users").select(
-        "id, email, first_name, last_name").in_("id", b).execute().data or [])
+        "id, email, first_name, last_name, deleted_at").in_("id", b).execute().data or [])
     return {r["id"]: r for r in rows}
+
+
+def _live(rows: list[dict], key: str, people: dict[str, dict]) -> list[dict]:
+    """Drop rows that belong to a soft-deleted account."""
+    return [r for r in rows if not (people.get(r.get(key)) or {}).get("deleted_at")]
 
 
 def _name(p: dict | None) -> str:
@@ -93,6 +103,7 @@ def _students(sb, course_id, lo, hi):
     rows = _fetch(lambda: sb.table("enrolments").select("student_id, status, enrolled_at, completed_at, withdrawn_at, extra_time_minutes")
                   .eq("course_id", course_id), "enrolled_at", lo, hi)
     people = _people(sb, {r["student_id"] for r in rows})
+    rows = _live(rows, "student_id", people)
     return (["email", "name", "status", "enrolled_at", "completed_at", "withdrawn_at", "extra_time_minutes"],
             [[people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r["status"],
               r.get("enrolled_at"), r.get("completed_at"), r.get("withdrawn_at"), r.get("extra_time_minutes")] for r in rows])
@@ -102,6 +113,7 @@ def _sessions(sb, course_id, lo, hi):
     rows = _fetch(lambda: sb.table("sessions").select("id, user_id, title, current_mode, prefers_video, started_at, archived_at")
                   .eq("course_id", course_id), "started_at", lo, hi)
     people = _people(sb, {r["user_id"] for r in rows})
+    rows = _live(rows, "user_id", people)
     return (["session_id", "email", "name", "title", "mode", "format", "started_at", "archived"],
             [[r["id"], people.get(r["user_id"], {}).get("email"), _name(people.get(r["user_id"])), r.get("title"),
               r.get("current_mode"), "video" if r.get("prefers_video") else "text", r.get("started_at"),
@@ -115,6 +127,7 @@ def _conversations(sb, course_id, lo, hi):
         .in_("session_id", b), "created_at", lo, hi))
     rows.sort(key=lambda r: r.get("created_at") or "")
     people = _people(sb, {r["user_id"] for r in rows if r.get("user_id")})
+    rows = _live(rows, "user_id", people)
     return (["session_id", "session_title", "email", "name", "mode", "format", "asked_at", "student_message", "tutor_answer"],
             [[r["session_id"], sessions.get(r["session_id"], {}).get("title"), people.get(r.get("user_id"), {}).get("email"),
               _name(people.get(r.get("user_id"))), r.get("mode"), r.get("response_format"), r.get("created_at"),
@@ -130,6 +143,7 @@ def _exam_results(sb, course_id, lo, hi):
     questions = {q["id"]: q for q in _in_batches(list(papers), lambda b: sb.table("assessment_questions").select(
         "id, prompt, points, topic, order_index").in_("assessment_id", b).execute().data or [])}
     people = _people(sb, {r["student_id"] for r in rows})
+    rows = _live(rows, "student_id", people)
     rows.sort(key=lambda r: (r.get("created_at") or "", questions.get(r["question_id"], {}).get("order_index") or 0))
     return (["exam", "kind", "email", "name", "question_no", "question", "topic", "answer", "score", "out_of",
              "correct", "awaiting_review", "seconds_on_question", "submitted_at"],
@@ -146,6 +160,7 @@ def _mastery(sb, course_id, lo, hi):
     rows = _fetch(lambda: sb.table("mastery_states").select("student_id, topic, mastery_score, attempts_count, correct_count, last_practised_at, updated_at")
                   .eq("course_id", course_id), "updated_at", lo, hi)
     people = _people(sb, {r["student_id"] for r in rows})
+    rows = _live(rows, "student_id", people)
     return (["email", "name", "topic", "mastery_percent", "attempts", "correct", "last_practised_at", "updated_at"],
             [[people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r.get("topic"),
               round(float(r.get("mastery_score") or 0) * 100, 1), r.get("attempts_count"), r.get("correct_count"),
@@ -161,6 +176,7 @@ def _activities(sb, course_id, lo, hi):
     for sid in {r["student_id"] for r in rows}:
         status.update({a["id"]: a["status"] for a in assignments.for_student(sid, course_id)})
     people = _people(sb, {r["student_id"] for r in rows})
+    rows = _live(rows, "student_id", people)
     return (["email", "name", "activity", "kind", "required", "status", "assigned_at"],
             [[people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r["title"], r["kind"],
               "yes" if r["required"] else "no", status.get(r["id"], "not published"), r["created_at"]] for r in rows])
@@ -170,6 +186,7 @@ def _engagement(sb, course_id, lo, hi):
     rows = _fetch(lambda: sb.table("events").select("user_id, event_type, topic, session_id, created_at")
                   .eq("course_id", course_id), "created_at", lo, hi)
     people = _people(sb, {r["user_id"] for r in rows if r.get("user_id")})
+    rows = _live(rows, "user_id", people)
     return (["event", "email", "name", "topic", "session_id", "at"],
             [[r["event_type"], people.get(r.get("user_id"), {}).get("email"), _name(people.get(r.get("user_id"))),
               r.get("topic"), r.get("session_id"), r["created_at"]] for r in rows])
@@ -179,6 +196,7 @@ def _feedback(sb, course_id, lo, hi):
     rows = _fetch(lambda: sb.table("feedback_responses").select("user_id, role_at_time, feedback_type, rating, nps_score, mode, free_text, created_at")
                   .eq("course_id", course_id), "created_at", lo, hi)
     people = _people(sb, {r["user_id"] for r in rows if r.get("user_id")})
+    rows = _live(rows, "user_id", people)
     return (["email", "name", "role", "type", "rating", "nps", "mode", "comment", "at"],
             [[people.get(r.get("user_id"), {}).get("email"), _name(people.get(r.get("user_id"))), r.get("role_at_time"),
               r.get("feedback_type"), r.get("rating"), r.get("nps_score"), r.get("mode"), r.get("free_text"),
@@ -192,11 +210,29 @@ DATASETS: dict[str, Callable] = {
 }
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def safe_cell(value):
+    """A cell Excel or Sheets will show as text, never run as a formula.
+
+    Student answers and messages are free text; one starting with "=" (say
+    =HYPERLINK(...)) would otherwise execute when the instructor opens the
+    file. OWASP CSV-injection guidance: prefix a single quote. Numbers are
+    left alone, so -3 stays a number.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.startswith(_FORMULA_START):
+        return "'" + value
+    return value
+
+
 def to_csv(header: list[str], rows: list[list]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(header)
-    writer.writerows(["" if v is None else v for v in row] for row in rows)
+    writer.writerows([safe_cell(v) for v in row] for row in rows)
     if len(rows) >= MAX_ROWS:
         writer.writerow([f"(cut at {MAX_ROWS} rows — narrow the date range for the rest)"])
     return buf.getvalue()

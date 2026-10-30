@@ -32,3 +32,20 @@ def test_csv_quotes_text_and_blanks_missing_values():
 def test_a_cut_download_says_so():
     out = to_csv(["n"], [[i] for i in range(MAX_ROWS)])
     assert out.rstrip().endswith("narrow the date range for the rest)")
+
+
+def test_formula_cells_are_neutralised_but_numbers_are_not():
+    from app.api.v1.lecturer.data_center import safe_cell
+
+    for bad in ("=HYPERLINK(\"x\")", "+1+1", "-2x", "@SUM(A1)", "\tx", "\rx"):
+        assert safe_cell(bad) == "'" + bad
+    assert safe_cell("x = 2") == "x = 2"
+    assert safe_cell(-3) == -3 and safe_cell(None) == ""
+
+
+def test_soft_deleted_students_are_left_out():
+    from app.api.v1.lecturer.data_center import _live
+
+    people = {"a": {"deleted_at": None}, "b": {"deleted_at": "2026-10-01T00:00:00Z"}}
+    rows = [{"student_id": "a"}, {"student_id": "b"}, {"student_id": "unknown"}]
+    assert _live(rows, "student_id", people) == [{"student_id": "a"}, {"student_id": "unknown"}]
