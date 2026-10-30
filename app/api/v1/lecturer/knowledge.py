@@ -29,7 +29,7 @@ from app.media.storage_service import COURSE_VIDEOS_BUCKET, _safe_segment
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/courses/{course_id}/knowledge", tags=["Lecturer – Knowledge"])
+router = APIRouter(prefix="/courses/{course_id}/knowledge", tags=["Instructor – Knowledge"])
 
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 # Leading bytes each accepted format must actually start with. The extension

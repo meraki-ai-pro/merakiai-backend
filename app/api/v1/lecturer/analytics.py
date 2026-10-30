@@ -25,7 +25,7 @@ from app.db.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/courses/{course_id}/analytics", tags=["Lecturer – Analytics"])
+router = APIRouter(prefix="/courses/{course_id}/analytics", tags=["Instructor – Analytics"])
 
 
 def _safe(fn, default):

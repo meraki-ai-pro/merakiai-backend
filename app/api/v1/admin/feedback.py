@@ -111,7 +111,7 @@ def _author(profile: dict | None, role_at_time: str | None = None) -> dict:
 @router.get("")
 async def list_feedback(
     days: int = Query(90, ge=1, le=365),
-    role: str | None = Query(None, description="student|lecturer|admin — role at submission"),
+    role: str | None = Query(None, description="student|instructor|admin — role at submission"),
     source: Source | None = None,
     course_id: str | None = None,
     page: int = Query(1, ge=1),

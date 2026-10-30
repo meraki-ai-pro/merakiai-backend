@@ -105,7 +105,7 @@ def request_deletion(
         **result,
         "message": (
             f"Your account is deactivated and will be permanently deleted after "
-            f"{lifecycle.RETENTION_DAYS} days. Contact your lecturer before then "
+            f"{lifecycle.RETENTION_DAYS} days. Contact your instructor before then "
             "if this was a mistake."
         ),
     }

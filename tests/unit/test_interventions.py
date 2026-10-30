@@ -136,7 +136,7 @@ class TestMiniLessonSend:
         assert out == {"status": "sent", "sent": 2, "skipped": 1}
         sessions, convos = db.of("sessions"), db.of("conversations")
         assert {s["user_id"] for s in sessions} == {"s1", "s2"}
-        assert all(s["title"] == "From your lecturer: Limits" for s in sessions)
+        assert all(s["title"] == "From your instructor: Limits" for s in sessions)
         assert all(c["user_input"].startswith("(system)") for c in convos)
 
     def test_empty_list_means_the_whole_active_class(self, db):

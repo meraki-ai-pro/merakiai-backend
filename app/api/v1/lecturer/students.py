@@ -22,7 +22,7 @@ from app.db.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/courses/{course_id}", tags=["Lecturer – Students"])
+router = APIRouter(prefix="/courses/{course_id}", tags=["Instructor – Students"])
 
 EnrolmentStatus = Literal["active", "completed", "withdrawn", "archived"]
 

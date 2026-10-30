@@ -34,7 +34,7 @@ from app.db.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/courses/{course_id}/interventions", tags=["Lecturer – Interventions"])
+router = APIRouter(prefix="/courses/{course_id}/interventions", tags=["Instructor – Interventions"])
 
 Format = Literal["practice", "diagnostic", "retrieval"]
 
@@ -112,16 +112,16 @@ def _focus_text(focus: Focus, n_students: int) -> str:
     return "\n".join(lines)
 
 
-_OPTIONS_SYSTEM = """You advise a university lecturer on how to respond to a
+_OPTIONS_SYSTEM = """You advise a university instructor on how to respond to a
 learning difficulty in their class. Their platform can do these things for
-them, each reviewed by the lecturer before students see it:
+them, each reviewed by the instructor before students see it:
 
 - "practice": a short auto-marked practice paper for the chosen students
 - "diagnostic": a timed 10-minute check to find out how widespread the problem is
 - "retrieval": a short check that opens in a week, to see whether the fix held
 - "mini_lesson": a short lesson sent to the chosen students as a tutor session
 
-Everything else is done by the lecturer in person, e.g. a worked example in the
+Everything else is done by the instructor in person, e.g. a worked example in the
 next lecture, a group activity, or revisiting a prerequisite.
 
 Suggest the 3 most useful responses, best first, for the situation given.
@@ -131,7 +131,7 @@ Return JSON only:
   topic and misconception>"}]}"""
 
 _PRACTICE_SYSTEM = """You write short practice questions for university students
-from their lecturer's course material.
+from their instructor's course material.
 
 Return JSON only: {"questions": [{"question_type": "mcq" | "fill_blank",
 "prompt": "...", "options": ["...", ...], "correct_answer": "..."}]}
@@ -254,7 +254,7 @@ async def create_practice(
         "title": f"{fmt['title']}: {payload.topic}"[:200],
         # Neutral on purpose: students are not told which misconception
         # they were grouped by.
-        "instructions": f"A short {fmt['title'].lower()} on {payload.topic}, set by your lecturer.",
+        "instructions": f"A short {fmt['title'].lower()} on {payload.topic}, set by your instructor.",
         "time_limit_minutes": fmt["minutes"],
         "target_student_ids": students or None,
     }
@@ -356,7 +356,7 @@ def send_mini_lesson(
 
     sb = get_supabase()
     now = datetime.now(timezone.utc).isoformat()
-    title = f"From your lecturer: {payload.topic}"[:120]
+    title = f"From your instructor: {payload.topic}"[:120]
     sent = 0
     assigned = []
     for sid in students:

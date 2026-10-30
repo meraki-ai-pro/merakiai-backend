@@ -26,7 +26,7 @@ from app.db.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
 
-LOCK_MESSAGE = "Finish the activity your lecturer assigned before starting or reopening other sessions."
+LOCK_MESSAGE = "Finish the activity your instructor assigned before starting or reopening other sessions."
 
 
 def _ts(value) -> datetime | None:

@@ -14,7 +14,7 @@ from app.core.academic_levels import AcademicLevel, as_options, normalise
 from app.core.auth import ADMIN_ROLES, assert_course_owner, lecturer_guard
 from app.db.supabase import get_supabase
 
-router = APIRouter(prefix="/courses", tags=["Lecturer – Courses"])
+router = APIRouter(prefix="/courses", tags=["Instructor – Courses"])
 
 # Single source of truth — see app/core/academic_levels.py
 

@@ -79,7 +79,7 @@ Rules:
 markdown, no bullet points, no speaker labels, no timestamps.
 - Narrate what is ON SCREEN, in the order it appears. The animation is the \
 lesson; you are the voice explaining it, not a separate summary of the topic.
-- Write out mathematics the way a lecturer says it aloud: "d y by d x", \
+- Write out mathematics the way an instructor says it aloud: "d y by d x", \
 "x squared", "the integral from zero to one of", "n choose k". Never emit \
 LaTeX, backslashes, carets or underscores — the voice will read them literally.
 - Plain sentences a listener can follow at speed. No sentence longer than about \

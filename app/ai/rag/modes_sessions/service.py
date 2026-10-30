@@ -485,7 +485,7 @@ def _topic_block(topics: List[str]) -> str:
         return ""
     listed = "\n".join(f"- {t}" for t in topics[:60])
     return (
-        "\n\nCOURSE TOPICS (the lecturer's names):\n"
+        "\n\nCOURSE TOPICS (the instructor's names):\n"
         f"{listed}\n"
         'Set "category" to the ONE topic above that this question tests, spelled '
         'exactly as listed. If none fits, set "category" to "".'

@@ -408,7 +408,7 @@ Rules:
 - short_answer: correct_answer is a model answer a marker can compare against.
 - If the paper gives the answer (an answer key, a marking scheme), use it and
   set answer_source "paper". If it does not, work the answer out and set
-  "inferred" — the lecturer checks every inferred answer before it is used.
+  "inferred" — the instructor checks every inferred answer before it is used.
 - Keep mathematics as LaTeX inside $...$. Copy the question text faithfully;
   do not reword, simplify or merge questions.
 - Instructions, headers, and rubric text are not questions. Skip them.
@@ -423,7 +423,7 @@ in steps of 0.5. Be consistent: the same answer must always earn the same mark.
 Return JSON only: {"score": <number from 0 to max>, "feedback": "<one or two
 sentences addressed to the student as "you": what was right, what was
 missing>"}. Never write "the student".
-A lecturer reviews every suggestion before the student sees it."""
+An instructor reviews every suggestion before the student sees it."""
 
 
 async def _extract_questions(text: str) -> list[dict]:

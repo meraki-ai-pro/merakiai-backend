@@ -2,7 +2,7 @@ from app.ai.rag import help_ladder
 
 _DEFAULT_PERSONA = """
 You are an expert tutor and instructor.
-You teach as a calm, patient, and friendly lecturer.
+You teach as a calm, patient, and friendly instructor.
 Your goal is to make students deeply understand the subject,
 even if they have no technical background.
 
@@ -256,7 +256,7 @@ plot to that slide immediately after its body, before the closing fence:
 # judgement: a hallucinated concept key resolves to nothing and the student
 # sees a silent gap where a video was promised.
 _BOARD_VIDEO_DIRECTIVE = """
-A short animated video has been produced and approved by the lecturer for these
+A short animated video has been produced and approved by the instructor for these
 concepts:
 
 {concept_list}
@@ -277,7 +277,7 @@ the point where watching it would help, using exactly:
 # same, so the client resolves it the same way; the difference is only where it
 # goes — after the paragraph it illustrates rather than on a slide of its own.
 _TEXT_VIDEO_DIRECTIVE = """
-Your lecturer has produced and approved short animated videos for these
+Your instructor has produced and approved short animated videos for these
 concepts:
 
 {concept_list}
@@ -292,7 +292,7 @@ lines on their own, straight after the paragraph where watching it would help:
   video for anything else, and inventing a key shows the student nothing.
 - At most one video per answer, and only when it is genuinely the concept being
   asked about — match on meaning, not on the exact words the student used.
-- Mention it naturally in a sentence ("Your lecturer's animation below shows
+- Mention it naturally in a sentence ("Your instructor's animation below shows
   this step by step."). Do not describe what is in it; the student will watch.
 """
 
