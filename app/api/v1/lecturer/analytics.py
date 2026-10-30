@@ -92,6 +92,11 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
             "withdrawn": status_counts.get("withdrawn", 0),
             "ever_opened_a_session": active_students,
             "enrolled_but_never_started": len(enrolled_ids) - active_students,
+            # Named, so the instructor can follow up with each one.
+            "never_started": sorted(
+                _people(sb, sorted(enrolled_ids - started_ids)).values(),
+                key=lambda p: (p["name"] or p["email"] or "").lower(),
+            ),
             # Surfaced separately rather than folded in, so a lecturer's own
             # testing is visible but never inflates the cohort figures.
             "non_student_session_users": staff_sessions,
@@ -103,6 +108,14 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
                 "review": mode_counts.get("review", 0),
                 "application": mode_counts.get("application", 0),
             },
+            # What the tutor actually delivered, per answer: text or video.
+            # Enrolled students only, like time on task.
+            "by_format": _safe(
+                lambda: _responses_by_format(
+                    sb, [x["id"] for x in sessions if x["user_id"] in enrolled_ids]
+                ),
+                {"text": 0, "video": 0},
+            ),
         },
         "knowledge": {
             "total": len(live_docs),
@@ -135,6 +148,24 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
         # metric that is not yet instrumented.
         "unavailable": [],
     }
+
+
+def _responses_by_format(sb, session_ids: list[str]) -> dict[str, int]:
+    """Tutor answers delivered as text vs video across these sessions.
+
+    Counted server-side (count="exact", head only) in batches, so a busy course
+    costs a few small requests, not a transfer of every conversation row.
+    """
+    out = {"text": 0, "video": 0}
+    for i in range(0, len(session_ids), 150):  # keeps the IN list inside URL limits
+        batch = session_ids[i:i + 150]
+        for fmt in out:
+            res = (
+                sb.table("conversations").select("id", count="exact", head=True)
+                .in_("session_id", batch).eq("response_format", fmt).execute()
+            )
+            out[fmt] += res.count or 0
+    return out
 
 
 # Session length bands, in whole minutes of active study, both ends inclusive.
@@ -553,7 +584,7 @@ def student_timeline(course_id: str, student_id: str, user=Depends(lecturer_guar
     # 404, not 403, and not an empty timeline: a lecturer must not be able to
     # confirm that an arbitrary user id exists by probing it here.
     enrolled = _safe(
-        lambda: sb.table("enrolments").select("student_id")
+        lambda: sb.table("enrolments").select("student_id, status, enrolled_at")
         .eq("course_id", course_id).eq("student_id", student_id).limit(1).execute().data or [],
         [],
     )
@@ -575,8 +606,35 @@ def student_timeline(course_id: str, student_id: str, user=Depends(lecturer_guar
 
     return {
         "student": _people(sb, [student_id])[student_id],
+        "profile": _profile(sb, course_id, student_id, enrolled[0]),
         "mastery": for_student(student_id, course_id),
         "timeline": build(rows),
+    }
+
+
+def _profile(sb, course_id: str, student_id: str, enrolment: dict) -> dict:
+    """Who the student is and how far they have got — useful most of all for a
+    student with no timeline yet, who would otherwise show as a blank."""
+    user = (_safe(
+        lambda: sb.table("users").select("email, university_name, region, country, created_at")
+        .eq("id", student_id).limit(1).execute().data or [{}],
+        [{}],
+    ) or [{}])[0]
+    sessions = _safe(
+        lambda: sb.table("sessions").select("started_at")
+        .eq("course_id", course_id).eq("user_id", student_id)
+        .order("started_at", desc=True).execute().data or [],
+        [],
+    )
+    return {
+        "email": user.get("email"),
+        "university": user.get("university_name"),
+        "location": ", ".join(x for x in (user.get("region"), user.get("country")) if x) or None,
+        "joined_meraki": user.get("created_at"),
+        "enrolment_status": enrolment.get("status"),
+        "enrolled_at": enrolment.get("enrolled_at"),
+        "sessions": len(sessions),
+        "last_session_at": sessions[0]["started_at"] if sessions else None,
     }
 
 
