@@ -137,8 +137,10 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
     }
 
 
-# Session length buckets, in minutes of active study. Upper bound exclusive.
-SESSION_LENGTH_BUCKETS = ((0, 5, "<5 min"), (5, 15, "5–15"), (15, 30, "15–30"), (30, 60, "30–60"), (60, 10**9, "60+"))
+# Session length bands, in whole minutes of active study, both ends inclusive.
+# The client asked for these exact, non-overlapping labels: the old "5–15" and
+# "15–30" both appeared to own a 15-minute session.
+SESSION_LENGTH_BUCKETS = ((0, 4, "<5 min"), (5, 15, "5–15 min"), (16, 30, "16–30 min"), (31, 60, "31–60 min"), (61, 10**9, "61+ min"))
 
 # A gap between two messages longer than this is a break, not study. Credited
 # at this cap, so reading a long answer counts but a tab left open does not.
@@ -208,7 +210,7 @@ def _time_on_task(turns: dict[str, list[datetime]]) -> dict:
         "median_minutes": round(median, 1),
         "break_minutes": BREAK_MINUTES,
         "histogram": [
-            {"bucket": label, "sessions": sum(lo <= m < hi for m in durations)}
+            {"bucket": label, "sessions": sum(lo <= round(m) <= hi for m in durations)}
             for lo, hi, label in SESSION_LENGTH_BUCKETS
         ],
     }

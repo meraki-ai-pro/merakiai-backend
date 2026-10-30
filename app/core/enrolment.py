@@ -230,6 +230,8 @@ def _redemption_error(exc: Exception) -> str:
         "no longer active",
         "has expired",
         "fully used",
+        # sql/026: the course's own instructor trying their invite code.
+        "The course instructor cannot enrol",
     ):
         if known in text:
             start = text.find(known)

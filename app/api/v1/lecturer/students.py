@@ -110,6 +110,11 @@ def deactivate_invite_code(
 
 # ── Enrolments ──────────────────────────────────────────────────────────────
 
+def _course_owner(sb, course_id: str) -> str | None:
+    rows = sb.table("courses").select("owner_id").eq("id", course_id).execute().data
+    return rows[0].get("owner_id") if rows else None
+
+
 @router.get("/students")
 def list_students(course_id: str, status: str | None = None, user=Depends(lecturer_guard)):
     assert_course_owner(user, course_id)
@@ -166,6 +171,11 @@ def add_student(
         )
 
     student_id = found[0]["id"]
+    if student_id == _course_owner(sb, course_id):
+        raise HTTPException(
+            status_code=400,
+            detail="That is the course instructor. Instructors open their own course without enrolling.",
+        )
     existing = (
         sb.table("enrolments").select("id, status")
         .eq("course_id", course_id).eq("student_id", student_id).execute().data
@@ -297,6 +307,7 @@ async def import_students(
         .eq("course_id", course_id).execute().data or []
     )
     enrolment_by_student = {e["student_id"]: e for e in existing_enrolments}
+    owner_id = _course_owner(sb, course_id)
 
     enrolled: list[str] = []
     reactivated: list[str] = []
@@ -328,6 +339,11 @@ async def import_students(
             invited.append(row.email)
             continue
 
+        if student_id == owner_id:
+            # An instructor's own row in their class list. Reported, not enrolled
+            # (sql/026 would refuse it and fail the whole bulk insert).
+            failed.append({"email": row.email, "reason": "The course instructor is not enrolled as a student"})
+            continue
         email_for[student_id] = row.email
         existing = enrolment_by_student.get(student_id)
         if existing is None:

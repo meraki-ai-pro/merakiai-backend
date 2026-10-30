@@ -39,6 +39,7 @@ set is safe.
 | 023 | course_video_sources | `course-videos` bucket, `documents.media_url` (lecture videos, uploaded or linked, as course sources) |
 | 024 | drop_extra_time_percent | Drops `enrolments.extra_time_percent` — **only after the backend using 022 is deployed** |
 | 025 | assignments_and_exam_integrity | `student_assignments` (Intervention Studio activities, optionally required), `assessment_starts.integrity_events` |
+| 026 | instructor_not_a_student | Trigger refusing an enrolment by the course's own instructor; removes any that exist |
 
 ## Dependencies worth knowing
 

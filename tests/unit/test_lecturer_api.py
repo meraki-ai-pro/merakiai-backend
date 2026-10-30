@@ -142,7 +142,9 @@ class TestKnowledgeDefaults:
     def test_delete_is_a_soft_delete(self):
         src = Path(knowledge.__file__).read_text(encoding="utf-8")
         assert "deleted_at" in src
-        assert ".delete()" not in src
+        # The documents row is only ever soft-deleted. (A deleted video's chunk
+        # rows are purged with its vectors — see test_knowledge_video_delete.)
+        assert 'table("documents").delete()' not in src
 
     def test_publish_changes_invalidate_the_visibility_cache(self):
         """The retriever caches visibility for 15s; without this an unpublished
@@ -288,3 +290,16 @@ class TestCohortCountsExcludeStaff:
     def test_staff_sessions_are_reported_separately(self):
         src = Path(analytics.__file__).read_text(encoding="utf-8")
         assert "non_student_session_users" in src
+
+
+def test_time_on_task_bands_are_the_clients_ranges():
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.v1.lecturer.analytics import _time_on_task
+
+    start = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    # One session per length, built from 1-minute gaps (each under the break cap).
+    lengths = [3, 5, 15, 16, 30, 31, 60, 61]
+    turns = {f"s{n}": [start + timedelta(minutes=i) for i in range(n + 1)] for n in lengths}
+    bands = {h["bucket"]: h["sessions"] for h in _time_on_task(turns)["histogram"]}
+    assert bands == {"<5 min": 1, "5–15 min": 2, "16–30 min": 2, "31–60 min": 2, "61+ min": 1}
