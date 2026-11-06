@@ -449,12 +449,15 @@ async def _do_mode_session_start(
 
     if mode == "review":
         _publish_status(session_id, "preparing", "Preparing your first question")
-        item, contexts = await generate_review_item(
-            session_type=session_type,
-            difficulty=difficulty,
-            course_id=course_id,
-            course_name=course_name,
-            difficulty_descriptors=difficulty_descriptors,
+        item, contexts = await asyncio.wait_for(
+            generate_review_item(
+                session_type=session_type,
+                difficulty=difficulty,
+                course_id=course_id,
+                course_name=course_name,
+                difficulty_descriptors=difficulty_descriptors,
+            ),
+            timeout=float(os.getenv("REVIEW_QUESTION_TIMEOUT_SECONDS", "55")),
         )
         prompt_text = format_review_prompt(item)
         await asyncio.gather(
@@ -995,13 +998,16 @@ async def _do_mode_session_turn(
     # a question from the same course, the same band and the same chunks, and
     # hands back the question it just asked with the options shuffled.
     asked_so_far = list(pending_payload.get("_asked") or [])
-    item2, ctx2 = await generate_review_item(
-        session_type=session_type,
-        difficulty=next_difficulty,
-        course_id=course_id,
-        course_name=course_name,
-        difficulty_descriptors=difficulty_descriptors,
-        asked=asked_so_far,
+    item2, ctx2 = await asyncio.wait_for(
+        generate_review_item(
+            session_type=session_type,
+            difficulty=next_difficulty,
+            course_id=course_id,
+            course_name=course_name,
+            difficulty_descriptors=difficulty_descriptors,
+            asked=asked_so_far,
+        ),
+        timeout=float(os.getenv("REVIEW_QUESTION_TIMEOUT_SECONDS", "55")),
     )
     asked_so_far.append(asked_summary(item2))
     next_prompt = format_review_prompt(item2)

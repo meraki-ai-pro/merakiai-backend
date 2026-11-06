@@ -1,8 +1,10 @@
-"""Review MCQs: the key must name a real option, and the order is shuffled."""
+"""Review MCQs: keys stay correct through shuffling and marking is local."""
 
+import asyncio
 import random
 from collections import Counter
 
+from app.ai.rag.modes_sessions import service
 from app.ai.rag.modes_sessions.service import mcq_choice, shuffle_mcq
 
 ITEM = {"question": "2 + 2?", "options": {"A": "4", "B": "3", "C": "5", "D": "22"}, "correct": "A"}
@@ -31,6 +33,45 @@ def test_question_without_a_valid_key_is_rejected():
 def test_lowercase_keys_and_bracketed_key_are_accepted():
     out = shuffle_mcq({**ITEM, "options": {"a": "4", "b": "3"}, "correct": "(a)"}, random.Random(1))
     assert out["options"][out["correct"]] == "4"
+
+
+def test_exact_answer_text_wins_over_a_conflicting_model_letter():
+    item = {**ITEM, "correct": "B", "correct_answer": "4"}
+    out = shuffle_mcq(item, random.Random(4))
+    assert out["options"][out["correct"]] == "4"
+
+
+def test_exact_answer_must_match_one_option():
+    assert shuffle_mcq({**ITEM, "correct_answer": "42"}) is None
+
+
+def test_mcq_marking_never_calls_claude(monkeypatch):
+    async def must_not_run(*args, **kwargs):
+        raise AssertionError("objective marking must not call Claude")
+
+    monkeypatch.setattr(service, "generate_response", must_not_run)
+    result = asyncio.run(
+        service.evaluate_review_answer(
+            {**ITEM, "type": "mcq"}, "A", ["2 + 2 = 4"], "Calculus"
+        )
+    )
+    assert result["verdict"] == "correct"
+    assert result["score"] == 1.0
+    assert result["correct_answer"] == "A) 4"
+
+
+def test_wrong_mcq_feedback_cannot_contradict_the_key(monkeypatch):
+    async def must_not_run(*args, **kwargs):
+        raise AssertionError("objective marking must not call Claude")
+
+    monkeypatch.setattr(service, "generate_response", must_not_run)
+    result = asyncio.run(
+        service.evaluate_review_answer(
+            {**ITEM, "type": "mcq"}, "B", ["2 + 2 = 4"], "Calculus"
+        )
+    )
+    assert result["verdict"] == "incorrect"
+    assert result["feedback"] == "You chose B) 3. The correct answer is A) 4."
 
 
 def test_reading_the_students_choice():

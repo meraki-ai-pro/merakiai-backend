@@ -35,12 +35,15 @@ Return ONLY raw JSON (no markdown, no fences, no extra text) in this exact schem
   "category": "<topic derived from reference>",
   "question": "<question text>",
   "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
-  "correct": "<the letter of the ONE correct option>"
+  "correct_answer": "<copy the exact full text of the ONE correct option>"
 }
 
 Rules:
 - Base ALL content ONLY on the REFERENCE MATERIAL in the user message.
-- Exactly ONE option is correct according to the reference; "correct" names it.
+- Solve the question before writing the options. Exactly ONE option must be
+  correct according to the reference.
+- "correct_answer" must be an exact character-for-character copy of that
+  option's full text. The server, not you, assigns its letter after shuffling.
   The other three must be plausible but definitely wrong.
 - Do NOT reveal the answer in the question text.
 - Options must be clearly distinct.
@@ -426,14 +429,33 @@ def shuffle_mcq(item: Dict[str, Any], rng: random.Random | None = None) -> Optio
     if not isinstance(opts, dict) or not 2 <= len(opts) <= 6:
         return None
     opts = {str(k).strip().upper(): str(v).strip() for k, v in opts.items()}
-    correct = str(item.get("correct") or "").strip().strip("().").upper()
     texts = list(opts.values())
-    if correct not in opts or not all(texts) or len(set(texts)) != len(texts):
+    if not all(texts) or len(set(texts)) != len(texts):
         return None
-    answer = opts[correct]
+
+    # New items name the answer by its exact text, so a model cannot calculate
+    # 38 correctly and then accidentally attach the key to "42".  Keep the
+    # legacy letter fallback for sessions created before this release.
+    exact_answer = str(item.get("correct_answer") or "").strip()
+    if "correct_answer" in item:
+        matches = [text for text in texts if text == exact_answer]
+        if len(matches) != 1:
+            return None
+        answer = matches[0]
+    else:
+        correct = str(item.get("correct") or "").strip().strip("().").upper()
+        if correct not in opts:
+            return None
+        answer = opts[correct]
+
     (rng or random).shuffle(texts)
     letters = "ABCDEF"[: len(texts)]
-    return {**item, "options": dict(zip(letters, texts)), "correct": letters[texts.index(answer)]}
+    return {
+        **item,
+        "options": dict(zip(letters, texts)),
+        "correct": letters[texts.index(answer)],
+        "correct_answer": answer,
+    }
 
 
 def mcq_choice(student_answer: str, options: Dict[str, str]) -> Optional[str]:
@@ -714,32 +736,41 @@ async def evaluate_review_answer(
         result["correct_answer"] = correct_label
         return result
 
-    # ── MCQ with a key: right/wrong is a letter comparison; LLM writes feedback ──
+    # ── MCQ with a key: marking is entirely deterministic ──────────────────
+    # Asking an LLM to re-grade an objective item added a second network wait
+    # and occasionally produced feedback that contradicted the stored key.
+    # The key was validated before the question was shown, so compare letters
+    # and build concise feedback locally.
     if itype == "mcq" and item.get("correct") in (item.get("options") or {}):
         correct = item["correct"]
         correct_text = f"{correct}) {item['options'][correct]}"
         picked = mcq_choice(student_answer, item["options"])
-        user_msg = (
-            f"Course: {course_name}\n"
-            f"Item Type: mcq\n\n"
-            f"Prompt/Question:\n{qblock}\n\n"
-            f"Correct answer: {correct_text}\n\n"
-            f"Student Answer:\n{student_answer}\n\n"
-            f"REFERENCE MATERIAL:\n{reference}"
-            + known
-            + f"\n\nNote: the student's choice is {'CORRECT' if picked == correct else 'INCORRECT'}."
-        )
-        raw = await generate_response(
-            prompt=user_msg, mode="review", system_parts=_make_system(_SYS_REVIEW_EVAL)
-        )
-        result = await safe_parse_json_with_retry(raw, label="review_evaluation_mcq")
         if picked == correct:
-            result["verdict"], result["score"] = "correct", max(float(result.get("score") or 0), 0.9)
-            result["misconception"] = ""
-        else:
-            result["verdict"], result["score"] = "incorrect", min(float(result.get("score") or 0), 0.2)
-        result["correct_answer"] = correct_text
-        return result
+            return {
+                "verdict": "correct",
+                "score": 1.0,
+                "rubric_level": "Excellent",
+                "feedback": f"Correct. You chose {correct_text}.",
+                "missing_points": [],
+                "unsupported_claims": [],
+                "correct_answer": correct_text,
+                "misconception": "",
+            }
+
+        picked_text = (
+            f"{picked}) {item['options'][picked]}" if picked in item["options"]
+            else student_answer.strip() or "no answer"
+        )
+        return {
+            "verdict": "incorrect",
+            "score": 0.0,
+            "rubric_level": "Unsatisfactory",
+            "feedback": f"You chose {picked_text}. The correct answer is {correct_text}.",
+            "missing_points": [f"Select {correct_text}."],
+            "unsupported_claims": [],
+            "correct_answer": correct_text,
+            "misconception": "",
+        }
 
     expected_points = item.get("expected_points", [])
 
