@@ -291,6 +291,12 @@ class TestCohortCountsExcludeStaff:
         src = Path(analytics.__file__).read_text(encoding="utf-8")
         assert "non_student_session_users" in src
 
+    def test_started_status_survives_session_deletion(self):
+        """The durable enrolment fact, not a remaining chat, defines started."""
+        src = Path(analytics.__file__).read_text(encoding="utf-8")
+        assert 'e.get("first_started_at")' in src
+        assert "durable_started_ids" in src
+
 
 def test_time_on_task_bands_are_the_clients_ranges():
     from datetime import datetime, timedelta, timezone

@@ -37,16 +37,27 @@ def _safe(fn, default):
         return default
 
 
+def _course_enrolments(sb, course_id: str) -> list[dict]:
+    """Read durable engagement columns, with a pre-migration fallback."""
+    try:
+        return (
+            sb.table("enrolments")
+            .select("status, student_id, first_started_at, last_activity_at")
+            .eq("course_id", course_id).execute().data or []
+        )
+    except Exception:
+        return (
+            sb.table("enrolments").select("status, student_id")
+            .eq("course_id", course_id).execute().data or []
+        )
+
+
 @router.get("")
 def course_analytics(course_id: str, user=Depends(lecturer_guard)):
     assert_course_owner(user, course_id)
     sb = get_supabase()
 
-    enrolments = _safe(
-        lambda: sb.table("enrolments").select("status, student_id")
-        .eq("course_id", course_id).execute().data or [],
-        [],
-    )
+    enrolments = _safe(lambda: _course_enrolments(sb, course_id), [])
     status_counts = Counter(e["status"] for e in enrolments)
     student_ids = [e["student_id"] for e in enrolments]
 
@@ -79,7 +90,15 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
     # "7 of 5 students have started" on a real dashboard and, worse, drove
     # enrolled_but_never_started to zero through the max() below.
     enrolled_ids = set(student_ids)
-    started_ids = {s["user_id"] for s in sessions} & enrolled_ids
+    durable_started_ids = {
+        e["student_id"] for e in enrolments if e.get("first_started_at")
+    }
+    # Live sessions remain a compatibility fallback until migration 028 is
+    # applied. Once populated, first_started_at survives deletion of every
+    # session and is the authoritative "ever started" fact.
+    started_ids = (
+        durable_started_ids | {s["user_id"] for s in sessions}
+    ) & enrolled_ids
     active_students = len(started_ids)
     staff_sessions = len({s["user_id"] for s in sessions} - enrolled_ids)
 

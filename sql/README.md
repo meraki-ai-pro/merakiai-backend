@@ -41,6 +41,7 @@ set is safe.
 | 025 | assignments_and_exam_integrity | `student_assignments` (Intervention Studio activities, optionally required), `assessment_starts.integrity_events` |
 | 026 | instructor_not_a_student | Trigger refusing an enrolment by the course's own instructor; removes any that exist |
 | 027 | exam_pass_mark | `assessments.pass_mark` (instructor-set pass mark; NULL = 50%) |
+| 028 | durable_course_engagement | `enrolments.first_started_at`, `last_activity_at`, and a trigger that preserves course-started status after session deletion |
 
 ## Dependencies worth knowing
 
@@ -74,6 +75,10 @@ breaks, but any policy written after 020 must call `private.is_admin()` (and
 recreate unused public copies.
 
 **024 waits for a deploy.** The previous backend selects `extra_time_percent`.
+
+**028 after 004 and 010.** It extends `enrolments`, backfills from `sessions`
+and retained `events`, then records the first session start independently of
+the student's deletable chat history.
 
 **021 waits for a deploy.** The previous backend calls `redeem_invite_code`
 with the student's JWT; dropping it first breaks "Join with an invite code".

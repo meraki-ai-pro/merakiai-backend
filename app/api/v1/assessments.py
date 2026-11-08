@@ -1228,16 +1228,19 @@ def take(assessment_id: str, user=Depends(auth_guard)):
     if already:
         raise HTTPException(status_code=409, detail="You have already submitted this paper.")
 
+    # Every sitting gets a server-side start row. Previously only timed papers
+    # did, so integrity events for untimed exams were silently ignored.
+    sb.table("assessment_starts").upsert(
+        {"assessment_id": assessment_id, "student_id": user["id"]},
+        on_conflict="assessment_id,student_id", ignore_duplicates=True,
+    ).execute()
+    start = sb.table("assessment_starts").select("started_at").eq(
+        "assessment_id", assessment_id
+    ).eq("student_id", user["id"]).execute().data
+
     deadline = None
     limit = assessment.get("time_limit_minutes")
     if limit:
-        sb.table("assessment_starts").upsert(
-            {"assessment_id": assessment_id, "student_id": user["id"]},
-            on_conflict="assessment_id,student_id", ignore_duplicates=True,
-        ).execute()
-        start = sb.table("assessment_starts").select("started_at").eq(
-            "assessment_id", assessment_id
-        ).eq("student_id", user["id"]).execute().data
         started_at = _ts(start[0]["started_at"]) if start else _now()
         deadline = deadline_for(started_at, limit, _extra_time(assessment["course_id"], user["id"]))
         closes = _ts(assessment.get("closes_at"))
@@ -1311,7 +1314,7 @@ def record_integrity_event(assessment_id: str, payload: IntegrityEvent, user=Dep
         "assessment_id", assessment_id
     ).eq("student_id", user["id"]).execute().data
     if not rows:
-        return {"status": "ignored"}  # untimed papers have no sitting row
+        return {"status": "ignored"}  # stale client that never opened the paper
     events = list(rows[0].get("integrity_events") or [])
     if len(events) < 500:  # a page stuck in a loop must not grow the row for ever
         events.append({"kind": payload.kind, "at": _now().isoformat()})

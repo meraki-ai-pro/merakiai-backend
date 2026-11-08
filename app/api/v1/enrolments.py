@@ -42,13 +42,23 @@ def join_course(payload: JoinPayload, user=Depends(auth_guard)):
 @router.get("")
 def list_my_enrolments(user=Depends(auth_guard)):
     """Every course this student is on. RLS restricts this to their own rows."""
-    rows = (
-        get_user_client(user["token"])
-        .table("enrolments")
-        .select("id, course_id, status, enrolled_at, completed_at")
-        .order("enrolled_at", desc=True)
-        .execute()
-        .data
-        or []
+    client = get_user_client(user["token"])
+    columns = (
+        "id, course_id, status, enrolled_at, completed_at, "
+        "first_started_at, last_activity_at"
     )
+    try:
+        result = (
+            client.table("enrolments").select(columns)
+            .order("enrolled_at", desc=True).execute()
+        )
+    except Exception:
+        # Migration 028 may be applied immediately after a zero-downtime code
+        # release; keep course access working during that short overlap.
+        result = (
+            client.table("enrolments")
+            .select("id, course_id, status, enrolled_at, completed_at")
+            .order("enrolled_at", desc=True).execute()
+        )
+    rows = result.data or []
     return {"enrolments": rows}

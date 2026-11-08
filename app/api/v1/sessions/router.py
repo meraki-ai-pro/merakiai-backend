@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.core import assignments
+from app.core import assignments, events
 from app.core.auth import auth_guard
 from app.core.enrolment import (
     PARTICIPATING_STATUSES,
@@ -251,6 +251,16 @@ def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
         raise HTTPException(status_code=500, detail="Failed to create session")
 
     row = ins.data[0]
+    # The database trigger is the source of truth for durable engagement.  The
+    # event is complementary research telemetry and also gives migrations a
+    # privacy-safe recovery source after a student deletes the chat itself.
+    events.emit(
+        events.SESSION_STARTED,
+        user_id=user["id"],
+        course_id=row["course_id"],
+        session_id=row["id"],
+        payload={"mode": row["current_mode"]},
+    )
     return {
         "session_id": row["id"],
         "course_id": row["course_id"],
