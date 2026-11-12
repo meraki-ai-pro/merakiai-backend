@@ -5,14 +5,14 @@
 # its Python graphics stack here only increases build time and attack surface.
 
 # Task queue
-celery==5.6.3
-kombu==5.6.2
-redis==7.4.0
+celery==5.7.0
+kombu==5.7.0
+redis==8.1.0
 
 # Supabase (media_assets rows + rendered-media storage)
-supabase==2.28.3
-postgrest==2.28.3
-python-dotenv==1.2.2
+supabase==2.34.1
+postgrest==2.34.1
+python-dotenv==1.2.4
 
 # Scene specification generation
-anthropic==0.95.0
+anthropic==2.6.0
