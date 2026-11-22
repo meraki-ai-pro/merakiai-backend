@@ -19,6 +19,7 @@ Usage as a FastAPI dependency:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 
@@ -39,10 +40,48 @@ def _get_redis() -> redis_sync.Redis:
     global _redis_pool
     if _redis_pool is None:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        _redis_pool = redis_sync.ConnectionPool.from_url(
-            redis_url, decode_responses=True, max_connections=20
+        _redis_pool = redis_sync.BlockingConnectionPool.from_url(
+            redis_url,
+            decode_responses=True,
+            max_connections=100,
+            timeout=1,
         )
     return redis_sync.Redis(connection_pool=_redis_pool)
+
+
+def _check_limit(key: str, max_calls: int, window_seconds: int) -> None:
+    try:
+        r = _get_redis()
+        count = r.incr(key)
+        if count == 1:
+            r.expire(key, window_seconds)
+    except Exception as exc:
+        # Redis unavailable — fail open (don't block the request).
+        logger.warning("Rate limit Redis error  key=%s  error=%s", key, exc)
+        return
+
+    if count > max_calls:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Max {max_calls} requests per {window_seconds}s.",
+        )
+
+
+def enforce_rate_limit(
+    *,
+    scope: str,
+    identifier: str,
+    max_calls: int,
+    window_seconds: int,
+) -> None:
+    """Apply a limit to a sensitive value without storing it in Redis keys.
+
+    Authentication routes use this alongside the shared-IP limit so a campus
+    NAT can serve a whole class while repeated attempts against one account or
+    refresh token remain tightly bounded.
+    """
+    digest = hashlib.sha256(identifier.strip().encode("utf-8")).hexdigest()
+    _check_limit(f"rl:{scope}:{digest}", max_calls, window_seconds)
 
 
 def rate_limit(max_calls: int, window_seconds: int):
@@ -71,20 +110,6 @@ def rate_limit(max_calls: int, window_seconds: int):
 
         key = f"rl:{request.url.path}:{identifier}"
 
-        try:
-            r = _get_redis()
-            count = r.incr(key)
-            if count == 1:
-                r.expire(key, window_seconds)
-        except Exception as exc:
-            # Redis unavailable — fail open (don't block the request)
-            logger.warning("Rate limit Redis error  key=%s  error=%s", key, exc)
-            return
-
-        if count > max_calls:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded. Max {max_calls} requests per {window_seconds}s.",
-            )
+        _check_limit(key, max_calls, window_seconds)
 
     return _dependency

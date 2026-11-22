@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.auth import auth_guard, require_mfa_for_password_change, security
-from app.core.rate_limit import rate_limit
+from app.core.rate_limit import enforce_rate_limit, rate_limit
 from app.db.supabase import get_supabase, get_supabase_anon
 from app.models.models import (
     ForgotPasswordPayload,
@@ -22,6 +22,13 @@ router = APIRouter(prefix="/auth", tags=["Auth (Supabase)"])
 
 PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "http://localhost:3001")
 recovery_security = HTTPBearer()
+
+# A university network can put hundreds of legitimate students behind one
+# public IP. Keep a broad network ceiling, then enforce tight limits on the
+# actual account or refresh token inside each endpoint.
+_AUTH_SHARED_IP_CALLS_PER_MINUTE = 300
+_LOGIN_ACCOUNT_CALLS_PER_MINUTE = 5
+_REFRESH_TOKEN_CALLS_PER_MINUTE = 10
 
 
 def _validate_redirect_url(redirect_to: str | None, fallback: str) -> str:
@@ -120,8 +127,20 @@ def signup(payload: SignUpPayload, _rl=Depends(rate_limit(max_calls=5, window_se
 
 
 @router.post("/login")
-def login(payload: LoginPayload, _rl=Depends(rate_limit(max_calls=10, window_seconds=60))):
+def login(
+    payload: LoginPayload,
+    _rl=Depends(
+        rate_limit(max_calls=_AUTH_SHARED_IP_CALLS_PER_MINUTE, window_seconds=60)
+    ),
+):
     from app.core.analytics import log_login
+
+    enforce_rate_limit(
+        scope="auth:login:account",
+        identifier=payload.email.strip().lower(),
+        max_calls=_LOGIN_ACCOUNT_CALLS_PER_MINUTE,
+        window_seconds=60,
+    )
 
     try:
         res = get_supabase_anon().auth.sign_in_with_password({
@@ -266,10 +285,21 @@ def google_callback(code: str | None = None):
 
 
 @router.post("/refresh")
-def refresh_token(body: dict, _rl=Depends(rate_limit(max_calls=10, window_seconds=60))):
+def refresh_token(
+    body: dict,
+    _rl=Depends(
+        rate_limit(max_calls=_AUTH_SHARED_IP_CALLS_PER_MINUTE, window_seconds=60)
+    ),
+):
     refresh = (body or {}).get("refresh_token", "").strip()
     if not refresh:
         raise HTTPException(status_code=400, detail="refresh_token is required")
+    enforce_rate_limit(
+        scope="auth:refresh:token",
+        identifier=refresh,
+        max_calls=_REFRESH_TOKEN_CALLS_PER_MINUTE,
+        window_seconds=60,
+    )
     try:
         res = get_supabase_anon().auth.refresh_session(refresh)
     except Exception as e:

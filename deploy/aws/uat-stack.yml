@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Dedicated MerakiAI UAT host, network boundary, and deployment roles.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-096e1d7f8bff736d8
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-043a803ea2e288ecb
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0f8a61b66d1accaee
+  InstanceType:
+    Type: String
+    Default: m7i-flex.large
+    AllowedValues:
+      - m7i-flex.large
+
+Resources:
+  UATSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: meraki-uat-sg
+      GroupDescription: MerakiAI UAT; SSM administration only; HTTPS from Cloudflare
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 173.245.48.0/20, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 103.21.244.0/22, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 103.22.200.0/22, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 103.31.4.0/22, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 141.101.64.0/18, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 108.162.192.0/18, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 190.93.240.0/20, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 188.114.96.0/20, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 197.234.240.0/22, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 198.41.128.0/17, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 162.158.0.0/15, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 104.16.0.0/13, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 104.24.0.0/14, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 172.64.0.0/13, Description: HTTPS from Cloudflare}
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 131.0.72.0/22, Description: HTTPS from Cloudflare}
+      Tags:
+        - {Key: Name, Value: meraki-uat-sg}
+        - {Key: Environment, Value: uat}
+
+  UATInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MerakiUATEC2Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Tags:
+        - {Key: Environment, Value: uat}
+
+  UATInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: MerakiUATEC2Role
+      Roles: [!Ref UATInstanceRole]
+
+  UATInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: {Name: !Ref UATInstanceProfile}
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref UATSecurityGroup]
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpTokens: required
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: 60
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/usr/bin/env bash
+          set -e
+          snap start amazon-ssm-agent || systemctl enable --now amazon-ssm-agent
+      Tags:
+        - {Key: Name, Value: MerakiAI-UAT}
+        - {Key: Environment, Value: uat}
+        - {Key: ManagedBy, Value: cloudformation}
+
+  UATElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - {Key: Name, Value: meraki-uat-eip}
+        - {Key: Environment, Value: uat}
+
+  UATElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt UATElasticIp.AllocationId
+      InstanceId: !Ref UATInstance
+
+  GitHubUATDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MerakiGitHubUATDeployRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: repo:meraki-ai-pro/merakiai-backend:environment:uat
+      Policies:
+        - PolicyName: SendUATDeployCommand
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${UATInstance}
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript
+              - Effect: Allow
+                Action:
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: '*'
+      Tags:
+        - {Key: Environment, Value: uat}
+
+Outputs:
+  InstanceId:
+    Value: !Ref UATInstance
+  PublicIp:
+    Value: !Ref UATElasticIp
+  InstanceRoleArn:
+    Value: !GetAtt UATInstanceRole.Arn
+  GitHubRoleArn:
+    Value: !GetAtt GitHubUATDeployRole.Arn

@@ -32,7 +32,7 @@ jobs:
         run: python -m pytest tests/unit -q
 
       - name: Validate EC2 deploy script
-        run: bash -n deploy/aws/meraki-deploy
+        run: bash -n deploy/aws/meraki-deploy deploy/aws/bootstrap-uat.sh
 
       - name: Audit installed dependencies
         run: |
@@ -92,7 +92,7 @@ jobs:
           command_id="$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --parameters 'commands=["sudo /usr/local/sbin/meraki-deploy ${{ github.sha }} uat"]' \
+            --parameters 'commands=["set -e","if [ ! -f /etc/meraki/uat-bootstrapped ]; then curl --fail --silent --show-error --location https://raw.githubusercontent.com/meraki-ai-pro/merakiai-backend/${{ github.sha }}/deploy/aws/bootstrap-uat.sh --output /tmp/bootstrap-uat.sh; sudo bash /tmp/bootstrap-uat.sh ${{ github.sha }} ${{ vars.UAT_SECRET_ARN }}; fi","sudo /usr/local/sbin/meraki-deploy ${{ github.sha }} uat"]' \
             --comment 'Meraki UAT ${{ github.sha }}' \
             --query 'Command.CommandId' --output text)"
           echo "command_id=$command_id" >> "$GITHUB_OUTPUT"

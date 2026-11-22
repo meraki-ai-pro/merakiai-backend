@@ -135,6 +135,7 @@ secrets):
 - `AWS_ROLE_ARN`
 - `AWS_REGION`
 - `EC2_INSTANCE_ID`
+- `UAT_SECRET_ARN` (UAT only; identifier, not the secret value)
 - `UAT_API_URL`
 - `PROD_API_URL`
 
