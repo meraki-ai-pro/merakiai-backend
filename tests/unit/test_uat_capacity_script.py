@@ -16,6 +16,7 @@ def test_percentile_uses_the_requested_rank():
 def test_capacity_stage_requires_success_latency_and_headroom():
     healthy = StageResult(
         cohort=200,
+        new_logins=100,
         login_ok=200,
         login_errors=0,
         login_statuses={"200": 200},
@@ -27,6 +28,7 @@ def test_capacity_stage_requires_success_latency_and_headroom():
         websocket_p50_ms=300,
         websocket_p95_ms=900,
         websocket_p99_ms=1_100,
+        cpu_p95_percent=60,
         peak_cpu_percent=70,
         peak_memory_percent=65,
         duration_seconds=8,

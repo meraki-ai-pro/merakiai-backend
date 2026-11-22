@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import os
+import threading
 from types import SimpleNamespace
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt as _jwt
-from jwt import InvalidTokenError
+from jwt import InvalidTokenError, PyJWKClient
+from jwt.exceptions import PyJWKClientError
 
 from app.db.supabase import get_supabase, get_user_client
 
@@ -14,8 +16,64 @@ logger = logging.getLogger(__name__)
 
 security = HTTPBearer()
 
-# Algorithm is pinned to HS256 — never allow "none" or RS256 confusion attacks.
+# Every verification path pins a small allow-list; never trust the token's alg
+# header without selecting the corresponding configured key source.
 _ALGORITHM = "HS256"
+_ASYMMETRIC_ALGORITHMS = ("ES256", "RS256")
+_jwks_clients: dict[str, PyJWKClient] = {}
+_jwks_lock = threading.Lock()
+
+
+def _get_jwks_client(supabase_url: str) -> PyJWKClient:
+    """Return a cached verifier for the project's public JWT signing keys."""
+    normalized = supabase_url.rstrip("/")
+    with _jwks_lock:
+        client = _jwks_clients.get(normalized)
+        if client is None:
+            client = PyJWKClient(
+                f"{normalized}/auth/v1/.well-known/jwks.json",
+                cache_keys=True,
+                lifespan=600,
+            )
+            _jwks_clients[normalized] = client
+        return client
+
+
+def _decode_access_token(token: str) -> dict:
+    """Verify legacy HS256 and modern Supabase asymmetric access tokens."""
+    try:
+        algorithm = str(_jwt.get_unverified_header(token).get("alg") or "")
+    except Exception as exc:
+        raise InvalidTokenError("Invalid JWT header") from exc
+
+    if algorithm == _ALGORITHM:
+        secret = os.getenv("SUPABASE_JWT_SECRET", "")
+        if not secret:
+            raise RuntimeError("SUPABASE_JWT_SECRET is not configured")
+        return _jwt.decode(
+            token,
+            secret,
+            algorithms=[_ALGORITHM],
+            options={"verify_aud": False},
+        )
+
+    if algorithm in _ASYMMETRIC_ALGORITHMS:
+        supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        if not supabase_url:
+            raise RuntimeError("SUPABASE_URL is not configured")
+        try:
+            signing_key = _get_jwks_client(supabase_url).get_signing_key_from_jwt(token)
+        except PyJWKClientError as exc:
+            raise RuntimeError("Supabase signing keys are unavailable") from exc
+        return _jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=[algorithm],
+            audience="authenticated",
+            issuer=f"{supabase_url}/auth/v1",
+        )
+
+    raise InvalidTokenError("Unsupported JWT signing algorithm")
 
 
 def _validate_token(
@@ -23,26 +81,18 @@ def _validate_token(
     *,
     allow_password_change: bool = False,
 ):
-    """Validate a Supabase JWT locally — no network round-trip required.
+    """Validate a Supabase JWT locally using its configured signing system.
 
-    Requires SUPABASE_JWT_SECRET (found in Supabase Dashboard → Settings → API
-    → JWT Secret) to be present in the environment.
+    Legacy HS256 projects use ``SUPABASE_JWT_SECRET``. Modern ES256/RS256
+    projects resolve and cache public signing keys from the project's JWKS.
     """
     token = credentials.credentials
-    secret = os.getenv("SUPABASE_JWT_SECRET", "")
-
-    if not secret:
+    try:
+        payload = _decode_access_token(token)
+    except RuntimeError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Server authentication is not properly configured.",
-        )
-
-    try:
-        payload = _jwt.decode(
-            token,
-            secret,
-            algorithms=[_ALGORITHM],
-            options={"verify_aud": False},  # Supabase sets aud="authenticated"
         )
     except InvalidTokenError:
         raise HTTPException(

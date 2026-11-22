@@ -54,9 +54,14 @@ def test_validate_token_rejects_an_expired_token(monkeypatch):
 
 def test_validate_token_fails_closed_without_a_server_secret(monkeypatch):
     monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+    token = jwt.encode(
+        {"sub": "user-123"},
+        "unconfigured-legacy-secret-with-enough-entropy",
+        algorithm="HS256",
+    )
 
     with pytest.raises(HTTPException) as exc_info:
-        _validate_token(_credentials("not-a-token"))
+        _validate_token(_credentials(token))
 
     assert exc_info.value.status_code == 500
 
