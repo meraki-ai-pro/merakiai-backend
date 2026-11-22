@@ -34,10 +34,10 @@ jobs:
       - name: Validate EC2 deploy script
         run: bash -n deploy/aws/meraki-deploy deploy/aws/bootstrap-uat.sh
 
-      - name: Audit installed dependencies
+      - name: Audit application dependencies
         run: |
           python -m pip install pip-audit==2.10.1
-          python -m pip_audit --progress-spinner off
+          python -m pip_audit --progress-spinner off --requirement requirements.lock.txt
 
   container-build:
     runs-on: ubuntu-latest
