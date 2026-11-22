@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 import json
 import os
 import secrets
@@ -42,6 +43,7 @@ class StageResult:
     cohort: int
     login_ok: int
     login_errors: int
+    login_statuses: dict[str, int]
     login_p50_ms: float
     login_p95_ms: float
     login_p99_ms: float
@@ -147,8 +149,8 @@ async def _login_users(
     client: httpx.AsyncClient,
     users: list[tuple[str, str]],
     password: str,
-) -> tuple[list[str], list[float], int]:
-    async def login_one(email: str) -> tuple[str | None, float]:
+) -> tuple[list[str], list[float], int, dict[str, int]]:
+    async def login_one(email: str) -> tuple[str | None, float, str]:
         started = time.perf_counter()
         try:
             response = await client.post(
@@ -157,16 +159,17 @@ async def _login_users(
             )
             elapsed = (time.perf_counter() - started) * 1_000
             if response.status_code != 200:
-                return None, elapsed
+                return None, elapsed, str(response.status_code)
             token = response.json().get("access_token")
-            return (str(token) if token else None), elapsed
+            return (str(token) if token else None), elapsed, str(response.status_code)
         except Exception:
-            return None, (time.perf_counter() - started) * 1_000
+            return None, (time.perf_counter() - started) * 1_000, "exception"
 
     outcomes = await asyncio.gather(*(login_one(email) for email, _user_id in users))
-    tokens = [token for token, _elapsed in outcomes if token]
-    latencies = [elapsed for token, elapsed in outcomes if token]
-    return tokens, latencies, len(outcomes) - len(tokens)
+    tokens = [token for token, _elapsed, _status in outcomes if token]
+    latencies = [elapsed for token, elapsed, _status in outcomes if token]
+    statuses = dict(sorted(Counter(status for _token, _elapsed, status in outcomes).items()))
+    return tokens, latencies, len(outcomes) - len(tokens), statuses
 
 
 async def _probe_websockets(
@@ -224,7 +227,11 @@ async def _run_stage(
 
     limits = httpx.Limits(max_connections=max(250, cohort + 25), max_keepalive_connections=50)
     async with httpx.AsyncClient(base_url=base_url, timeout=30, limits=limits) as client:
-        tokens, login_latencies, login_errors = await _login_users(client, users, password)
+        tokens, login_latencies, login_errors, login_statuses = await _login_users(
+            client,
+            users,
+            password,
+        )
     websocket_latencies, websocket_errors = await _probe_websockets(
         base_url,
         tokens,
@@ -241,6 +248,7 @@ async def _run_stage(
         cohort=cohort,
         login_ok=len(tokens),
         login_errors=login_errors,
+        login_statuses=login_statuses,
         login_p50_ms=round(percentile(login_latencies, 0.50), 1),
         login_p95_ms=round(percentile(login_latencies, 0.95), 1),
         login_p99_ms=round(percentile(login_latencies, 0.99), 1),

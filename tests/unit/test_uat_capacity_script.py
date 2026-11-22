@@ -13,6 +13,7 @@ def test_capacity_stage_requires_success_latency_and_headroom():
         cohort=200,
         login_ok=200,
         login_errors=0,
+        login_statuses={"200": 200},
         login_p50_ms=800,
         login_p95_ms=2_000,
         login_p99_ms=2_500,
