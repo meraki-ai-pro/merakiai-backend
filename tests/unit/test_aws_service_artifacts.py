@@ -47,6 +47,23 @@ def test_production_workflow_bootstraps_the_versioned_deploy_helper():
     assert "sudo install --owner root --group root --mode 0755" in workflow
 
 
+def test_uat_deploy_refreshes_versioned_edge_configuration():
+    deploy = (ROOT / "deploy" / "aws" / "meraki-deploy").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert 'refresh_uat_edge "$APP_DIR"' in deploy
+    assert "CLOUDFLARE_ORIGIN_CERT_PEM" in deploy
+    assert "merakiai-api-uat.conf" in deploy
+    assert workflow.count("/tmp/meraki-deploy") == 4
+
+
+def test_uat_hostname_is_covered_by_the_origin_certificate():
+    nginx = (ROOT / "deploy" / "aws" / "nginx" / "merakiai-api-uat.conf").read_text()
+
+    assert "server_name uat-api.merakiai.online;" in nginx
+    assert "server_name uat.api.merakiai.online;" not in nginx
+
+
 def test_deployment_waits_long_enough_for_a_cold_renderer_build():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
 

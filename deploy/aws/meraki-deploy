@@ -57,6 +57,52 @@ render_compose() {
       --file "$render_compose_file" "$@"
 }
 
+refresh_uat_edge() {
+  local source_dir="$1"
+  local runtime_env="/etc/meraki/backend-uat.env"
+
+  if [[ ! -r "$runtime_env" ]]; then
+    echo "UAT runtime environment is missing: $runtime_env" >&2
+    return 78
+  fi
+
+  # shellcheck disable=SC1090
+  source "$runtime_env"
+  if [[ -z "${AWS_SECRET_ARN:-}" || -z "${AWS_REGION:-}" ]]; then
+    echo "AWS_SECRET_ARN and AWS_REGION are required in $runtime_env" >&2
+    return 78
+  fi
+
+  install -d -o root -g root -m 0750 /etc/ssl/meraki-uat
+  AWS_REGION="$AWS_REGION" AWS_SECRET_ARN="$AWS_SECRET_ARN" \
+    "$VENV_DIR/bin/python" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+import boto3
+
+client = boto3.client("secretsmanager", region_name=os.environ["AWS_REGION"])
+payload = client.get_secret_value(SecretId=os.environ["AWS_SECRET_ARN"])
+secret = json.loads(payload["SecretString"])
+for key, destination in (
+    ("CLOUDFLARE_ORIGIN_CERT_PEM", "/etc/ssl/meraki-uat/origin.crt"),
+    ("CLOUDFLARE_ORIGIN_KEY_PEM", "/etc/ssl/meraki-uat/origin.key"),
+):
+    value = str(secret.get(key) or "").strip()
+    if not value:
+        raise RuntimeError(f"{key} is missing from the UAT secret")
+    path = Path(destination)
+    path.write_text(value + "\n", encoding="utf-8")
+    path.chmod(0o600)
+PY
+
+  install -o root -g root -m 0644 \
+    "$source_dir/deploy/aws/nginx/merakiai-api-uat.conf" \
+    /etc/nginx/sites-available/merakiai-api-uat
+  nginx -t
+}
+
 if [[ -n "$render_compose_file" ]]; then
   if [[ ! -f "$render_compose_file" || ! -r "$render_env_file" ]]; then
     echo "Render compose file or environment file is missing" >&2
@@ -92,6 +138,10 @@ rollback() {
     sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$previous_sha"
     sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
       --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
+    if [[ "$environment" == "uat" ]]; then
+      refresh_uat_edge "$APP_DIR" || true
+      systemctl restart nginx || true
+    fi
     systemctl restart "${services[@]}"
     if [[ -n "$render_compose_file" ]]; then
       render_compose "$previous_sha" up -d --remove-orphans || true
@@ -121,11 +171,18 @@ switched=1
 sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
   --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
 
+if [[ "$environment" == "uat" ]]; then
+  refresh_uat_edge "$APP_DIR"
+fi
+
 if [[ -n "$render_compose_file" ]]; then
   render_compose "$commit_sha" build
 fi
 
 systemctl restart "${services[@]}"
+if [[ "$environment" == "uat" ]]; then
+  systemctl restart nginx
+fi
 if [[ -n "$render_compose_file" ]]; then
   render_compose "$commit_sha" up -d --remove-orphans
 fi
