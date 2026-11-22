@@ -142,8 +142,8 @@ def _login_request(client_ip: str) -> Request:
             "http_version": "1.1",
             "method": "POST",
             "scheme": "https",
-            "path": "/api/v1/auth/login",
-            "raw_path": b"/api/v1/auth/login",
+            "path": "/auth/login",
+            "raw_path": b"/auth/login",
             "query_string": b"",
             "headers": [],
             "client": (client_ip, 443),
@@ -188,7 +188,7 @@ def test_classroom_login_burst_is_not_blocked_by_shared_ip(
         accepted = sum(outcomes)
         rejected = cohort_size - accepted
         shared_ip_count = int(
-            client.get(f"rl:/api/v1/auth/login:{client_ip}") or 0
+            client.get(f"rl:/auth/login:{client_ip}") or 0
         )
         account_key_count = sum(
             1 for _ in client.scan_iter(match="rl:auth:login:account:*")

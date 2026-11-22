@@ -86,7 +86,7 @@ async def _delete_rate_limit_keys(redis_url: str) -> None:
     client = aioredis.from_url(redis_url, decode_responses=True)
     try:
         for pattern in (
-            "rl:/api/v1/auth/login:*",
+            "rl:/auth/login:*",
             "rl:auth:login:account:*",
         ):
             keys = [key async for key in client.scan_iter(match=pattern, count=500)]
@@ -154,7 +154,7 @@ async def _login_users(
         started = time.perf_counter()
         try:
             response = await client.post(
-                "/api/v1/auth/login",
+                "/auth/login",
                 json={"email": email, "password": password},
             )
             elapsed = (time.perf_counter() - started) * 1_000

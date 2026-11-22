@@ -1,4 +1,9 @@
+from pathlib import Path
+
 from scripts.run_uat_capacity import StageResult, percentile
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_percentile_uses_the_requested_rank():
@@ -30,3 +35,10 @@ def test_capacity_stage_requires_success_latency_and_headroom():
     assert healthy.passed
     overloaded = StageResult(**{**healthy.__dict__, "login_ok": 199, "login_errors": 1})
     assert not overloaded.passed
+
+
+def test_live_runner_uses_the_deployed_auth_route():
+    runner = (ROOT / "scripts" / "run_uat_capacity.py").read_text()
+
+    assert '"/auth/login"' in runner
+    assert '"/api/v1/auth/login"' not in runner
