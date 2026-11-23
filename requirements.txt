@@ -11,6 +11,8 @@ python-dotenv==1.2.2
 # ── Auth / Security ───────────────────────────────────────────────────────────
 PyJWT[crypto]==2.15.0
 pydantic[email]==2.13.1
+# Security floor for email-validator DNS lookups (CVE-2026-128089).
+dnspython==2.9.2
 
 # ── Document parsing ──────────────────────────────────────────────────────────
 pypdf==6.21.4
