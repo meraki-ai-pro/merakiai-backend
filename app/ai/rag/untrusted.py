@@ -49,7 +49,12 @@ def _normalise(text: str) -> str:
     zero-width / other format characters (category Cf) are dropped, so neither
     a hidden character inside "ignore" nor a full-width "<" can slip past.
     """
-    text = unicodedata.normalize("NFKC", text or "")
+    raw = text or ""
+    text = unicodedata.normalize("NFKC", raw)
+    # A few characters expand a great deal under NFKC (one becomes ~18), which
+    # would turn a length cap enforced on the raw text into a much larger
+    # prompt. Honest text barely grows, so cap growth at 2x.
+    text = text[: 2 * len(raw) + 16]
     return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
 
 
