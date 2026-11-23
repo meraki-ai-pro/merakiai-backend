@@ -208,7 +208,7 @@ jobs:
           INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
           SECRET_ARN: ${{ vars.UAT_SECRET_ARN }}
         run: |
-          test_command="sudo -u meraki /srv/meraki-uat/.venv/bin/python /srv/meraki-uat/merakiai-backend/scripts/run_uat_ai_workload.py --secret-id $SECRET_ARN --cohorts 25 50 100 200 --active-ratio 0.20 --review-ratio 0.20 --worker-concurrency 2"
+          test_command="sudo -u meraki /srv/meraki-uat/.venv/bin/python /srv/meraki-uat/merakiai-backend/scripts/run_uat_ai_workload.py --secret-id $SECRET_ARN --cohorts 10 25 50 100 200 --active-ratio 0.20 --review-ratio 0.20 --worker-concurrency 2 --stop-on-failure"
           parameters="$(jq -cn --arg test_command "$test_command" '{commands:["set -e","sudo systemctl is-active meraki-api-uat meraki-celery-text-uat meraki-celery-video-uat meraki-celery-ingestion-uat nginx redis-server rabbitmq-server",$test_command]}')"
           command_id="$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \

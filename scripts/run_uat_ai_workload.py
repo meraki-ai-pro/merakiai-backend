@@ -163,11 +163,15 @@ def probe_task(kind: str, course_id: str, course_name: str, question: str) -> di
     try:
         return asyncio.run(_execute_probe(kind, course_id, course_name, question))
     except Exception as exc:  # noqa: BLE001 - the runner needs the provider error class
+        cause = exc.__cause__
         return {
             "ok": False,
             "kind": kind,
             "error_type": type(exc).__name__,
+            "error_module": type(exc).__module__,
             "error": str(exc)[:500],
+            "cause_type": type(cause).__name__ if cause else None,
+            "cause": str(cause)[:500] if cause else None,
             "worker_ms": 0.0,
             "source_count": 0,
             "response_chars": 0,
@@ -183,6 +187,8 @@ class StageResult:
     ok: int
     errors: int
     error_types: dict[str, int]
+    error_modules: dict[str, int]
+    error_samples: list[str]
     grounded: int
     grounded_percent: float
     end_to_end_p50_ms: float
@@ -323,6 +329,8 @@ def _run_stage(args: argparse.Namespace, cohort: int) -> StageResult:
     worker_times: list[float] = []
     queue_waits: list[float] = []
     error_types: Counter[str] = Counter()
+    error_modules: Counter[str] = Counter()
+    error_samples: list[str] = []
     grounded = 0
 
     for result, enqueued, kind in submitted:
@@ -349,6 +357,21 @@ def _run_stage(args: argparse.Namespace, cohort: int) -> StageResult:
             grounded += 1
         if not payload.get("ok"):
             error_types[str(payload.get("error_type") or "UnknownError")] += 1
+            error_modules[str(payload.get("error_module") or "unknown")] += 1
+            if len(error_samples) < 3:
+                detail = str(payload.get("cause") or payload.get("error") or "")[:200]
+                error_samples.append(
+                    ":".join(
+                        part
+                        for part in (
+                            str(payload.get("error_module") or "unknown"),
+                            str(payload.get("error_type") or "UnknownError"),
+                            str(payload.get("cause_type") or ""),
+                            detail,
+                        )
+                        if part
+                    )
+                )
 
     duration = time.perf_counter() - started
     cpu = [value for value, _memory in samples] or [0.0]
@@ -362,6 +385,8 @@ def _run_stage(args: argparse.Namespace, cohort: int) -> StageResult:
         ok=ok,
         errors=request_count - ok,
         error_types=dict(sorted(error_types.items())),
+        error_modules=dict(sorted(error_modules.items())),
+        error_samples=error_samples,
         grounded=grounded,
         grounded_percent=round(100 * grounded / request_count, 1),
         end_to_end_p50_ms=round(percentile(end_to_end, 0.50), 1),

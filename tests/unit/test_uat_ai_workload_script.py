@@ -49,6 +49,8 @@ def test_stage_requires_success_grounding_latency_and_memory():
         ok=40,
         errors=0,
         error_types={},
+        error_modules={},
+        error_samples=[],
         grounded=40,
         grounded_percent=100.0,
         end_to_end_p50_ms=20_000,
