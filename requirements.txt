@@ -43,6 +43,8 @@ requests==2.33.1
 httpx==0.28.1
 # Security floor for the shared aiohttp/Supabase HTTP header parser.
 multidict==6.9.1
+# CPU and memory headroom checks in the UAT capacity/workload runners.
+psutil==7.2.2
 
 # ── Task queue ────────────────────────────────────────────────────────────────
 celery==5.6.3
