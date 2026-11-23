@@ -85,9 +85,22 @@ def _load_secret(secret_id: str, region: str) -> dict[str, str]:
 def _apply_secret(secret: dict[str, str], secret_id: str, region: str) -> None:
     # Values stay in the process environment and are never printed or placed
     # on the worker command line.
-    os.environ.update(secret)
+    # Explicit runtime overrides win.  This is also how operators can recover
+    # from one malformed field without copying the whole JSON secret elsewhere.
+    for key, value in secret.items():
+        os.environ.setdefault(key, value)
     os.environ["AWS_SECRET_ARN"] = secret_id
     os.environ["AWS_REGION"] = region
+
+
+def safe_error_detail(value: Any) -> str:
+    detail = str(value or "").replace("\r", " ").replace("\n", " ")[:200]
+    lowered = detail.lower()
+    if any(marker in lowered for marker in ("private key", "begin rsa", "begin ec")):
+        return "[redacted credential-like value]"
+    if "illegal header value" in lowered:
+        return "[redacted invalid header value]"
+    return detail
 
 
 async def _execute_probe(
@@ -169,9 +182,9 @@ def probe_task(kind: str, course_id: str, course_name: str, question: str) -> di
             "kind": kind,
             "error_type": type(exc).__name__,
             "error_module": type(exc).__module__,
-            "error": str(exc)[:500],
+        "error": safe_error_detail(exc),
             "cause_type": type(cause).__name__ if cause else None,
-            "cause": str(cause)[:500] if cause else None,
+        "cause": safe_error_detail(cause) if cause else None,
             "worker_ms": 0.0,
             "source_count": 0,
             "response_chars": 0,

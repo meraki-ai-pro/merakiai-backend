@@ -205,11 +205,15 @@ jobs:
       - name: Start isolated AI workload test through SSM
         id: ai_workload
         env:
+          ANTHROPIC_WORKSPACE_ID: ${{ secrets.UAT_ANTHROPIC_WORKSPACE_ID }}
           INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
           SECRET_ARN: ${{ vars.UAT_SECRET_ARN }}
         run: |
-          test_command="sudo -u meraki /srv/meraki-uat/.venv/bin/python /srv/meraki-uat/merakiai-backend/scripts/run_uat_ai_workload.py --secret-id $SECRET_ARN --cohorts 10 25 50 100 200 --active-ratio 0.20 --review-ratio 0.20 --worker-concurrency 2 --stop-on-failure"
-          parameters="$(jq -cn --arg test_command "$test_command" '{commands:["set -e","sudo systemctl is-active meraki-api-uat meraki-celery-text-uat meraki-celery-video-uat meraki-celery-ingestion-uat nginx redis-server rabbitmq-server",$test_command]}')"
+          test -n "$ANTHROPIC_WORKSPACE_ID"
+          workspace_id_b64="$(printf '%s' "$ANTHROPIC_WORKSPACE_ID" | base64 -w0)"
+          configure_command="set -e; value=\$(printf '%s' '$workspace_id_b64' | base64 -d); sed -i '/^ANTHROPIC_WORKSPACE_ID=/d' /etc/meraki/backend-uat.env; printf 'ANTHROPIC_WORKSPACE_ID=%s\\n' \"\$value\" >> /etc/meraki/backend-uat.env; systemctl restart meraki-api-uat meraki-celery-text-uat meraki-celery-video-uat meraki-celery-ingestion-uat; systemctl is-active meraki-api-uat meraki-celery-text-uat meraki-celery-video-uat meraki-celery-ingestion-uat"
+          test_command="sudo -u meraki env ANTHROPIC_WORKSPACE_ID=$ANTHROPIC_WORKSPACE_ID /srv/meraki-uat/.venv/bin/python /srv/meraki-uat/merakiai-backend/scripts/run_uat_ai_workload.py --secret-id $SECRET_ARN --cohorts 10 25 50 100 200 --active-ratio 0.20 --review-ratio 0.20 --worker-concurrency 2 --stop-on-failure"
+          parameters="$(jq -cn --arg configure_command "$configure_command" --arg test_command "$test_command" '{commands:["set -e","systemctl is-active nginx redis-server rabbitmq-server",$configure_command,$test_command]}')"
           command_id="$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \

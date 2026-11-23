@@ -10,6 +10,7 @@ from scripts.run_uat_ai_workload import (
     StageResult,
     parse_args,
     percentile,
+    safe_error_detail,
     task_count_for,
     workload_kinds,
 )
@@ -38,6 +39,20 @@ def test_zero_review_ratio_is_learn_only():
 
 def test_percentile_is_nan_for_no_samples():
     assert math.isnan(percentile([], 0.95))
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Illegal header value b'-----BEGIN PRIVATE KEY-----abc'",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+    ],
+)
+def test_credential_like_provider_errors_are_redacted(detail):
+    redacted = safe_error_detail(detail)
+    assert "PRIVATE KEY" not in redacted
+    assert redacted.startswith("[redacted")
 
 
 def test_stage_requires_success_grounding_latency_and_memory():
