@@ -70,4 +70,5 @@ def test_deployment_waits_long_enough_for_a_cold_renderer_build():
     assert "aws ssm wait command-executed" not in workflow
     assert workflow.count("for attempt in $(seq 1 60)") == 2
     assert workflow.count("for attempt in $(seq 1 150)") == 1
-    assert workflow.count("Success|Failed|Cancelled|TimedOut|Cancelling") == 3
+    assert workflow.count("for attempt in $(seq 1 330)") == 1
+    assert workflow.count("Success|Failed|Cancelled|TimedOut|Cancelling") == 4
