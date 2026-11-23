@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -33,6 +32,7 @@ from app.core.auth import auth_guard
 from app.core.enrolment import require_enrolment
 from app.core.rate_limit import rate_limit
 from app.media.storage_service import BUCKET, PUBLIC_BASE
+from app.media.spoken import chunk_for_speech, spoken_answer
 from app.media.voices import voice_for_course
 
 logger = logging.getLogger(__name__)
@@ -49,30 +49,14 @@ _CACHE_PREFIX = "board-narration"
 
 class BoardNarrationRequest(BaseModel):
     course_id: str = Field(..., max_length=100)
-    # Already converted from LaTeX to spoken words by the client (lib/speech.ts)
-    # — the same conversion the browser voice used, so both paths say "d y by
-    # d x" rather than reading backslashes aloud.
-    text: str = Field(..., min_length=1, max_length=MAX_TEXT_CHARS)
-    # The slide's raw markdown (title + body) the text was made from. The
-    # server checks it against what the tutor actually said to this student,
-    # so the endpoint cannot be used to put arbitrary sentences in a
-    # lecturer's cloned voice.
+    # The raw markdown being read (a slide, a tutor answer, an exam question).
+    # The server verifies it against what the tutor actually said to this
+    # student, derives the spoken text itself, and voices chunk ``chunk`` of it.
+    # Nothing the client says about *how* it sounds is trusted.
     source: str = Field(..., min_length=1, max_length=8000)
+    chunk: int = Field(0, ge=0, le=60)
 
 
-# Words the client's maths-to-speech conversion introduces. They never appear
-# in the markdown, so they must not count against the text.
-_SPOKEN_MATH_WORDS = frozenset(
-    "over squared cubed equals plus minus times divided power sub root square cube "
-    "integral integrals sum product limit approaches infinity choose less greater "
-    "than equal not approximately partial pi theta alpha beta mu sigma lambda delta "
-    "real numbers natural integers and so on see table board figure plus or is the of "
-    "to from as in dollars".split()
-)
-_WORD_RE = re.compile(r"[A-Za-z]{3,}")
-_MIN_TEXT_COVERAGE = 0.8
-# Recent tutor turns searched for the slide. A lesson being listened to is
-# the one just given; this is generous without being an unbounded scan.
 _RECENT_TURNS = 60
 
 
@@ -81,43 +65,47 @@ def _norm(s: str) -> str:
 
 
 def source_is_tutor_text(source: str, tutor_responses: list[str]) -> bool:
-    """True when every line of ``source`` appears in one recent tutor answer."""
+    """True when the lines of ``source`` appear, in order, in one answer.
+
+    Order matters: independent per-line matching would let someone reassemble
+    sentences from fragments scattered through a long answer.
+    """
     lines = [_norm(l) for l in source.splitlines()]
     lines = [l for l in lines if l]
     if not lines:
         return False
-    corpus = [_norm(r) for r in tutor_responses if r]
-    return any(all(l in doc for l in lines) for doc in corpus)
-
-
-def text_matches_source(text: str, source: str) -> bool:
-    """True when the spoken text is made of the source's words.
-
-    The client converts LaTeX to words, so the text is not a substring of the
-    source; but its ordinary words must come from it. An arbitrary sentence
-    paired with a genuine slide fails here.
-    """
-    src_words = {w.lower() for w in _WORD_RE.findall(source)} | _SPOKEN_MATH_WORDS
-    words = [w.lower() for w in _WORD_RE.findall(text)]
-    if not words:
-        return True
-    hits = sum(1 for w in words if w in src_words)
-    return hits / len(words) >= _MIN_TEXT_COVERAGE
+    for doc in (_norm(r) for r in tutor_responses if r):
+        pos = 0
+        for line in lines:
+            found = doc.find(line, pos)
+            if found < 0:
+                break
+            pos = found + len(line)
+        else:
+            return True
+    return False
 
 
 def _exam_question_texts(sb, user_id: str, course_id: str) -> list[str]:
-    """Question text of exams this student may sit, formatted as the Listen
-    button reads it (prompt, then "Option A: ..." lines). Lecturer-authored
-    content, so it is safe to voice in the lecturer's voice."""
-    from app.api.v1.assessments import visible_to
+    """Question text of papers this student may sit RIGHT NOW, formatted as the
+    Listen button reads it. Closed-window papers are excluded, so the endpoint
+    cannot be used to probe questions that are not yet open."""
+    from fastapi import HTTPException as _HTTP
 
-    papers = [
-        a for a in (
-            sb.table("assessments").select("*").eq("course_id", course_id)
-            .eq("is_published", True).limit(50).execute().data or []
-        )
-        if visible_to(a, user_id)
-    ]
+    from app.api.v1.assessments import _check_window, visible_to
+
+    papers = []
+    for a in (
+        sb.table("assessments").select("*").eq("course_id", course_id)
+        .eq("is_published", True).limit(50).execute().data or []
+    ):
+        if not visible_to(a, user_id):
+            continue
+        try:
+            _check_window(a)
+        except _HTTP:
+            continue
+        papers.append(a)
     if not papers:
         return []
     rows = (
@@ -126,9 +114,8 @@ def _exam_question_texts(sb, user_id: str, course_id: str) -> list[str]:
     )
     docs = []
     for q in rows:
-        opts = q.get("options") or []
         lines = [q.get("prompt") or ""] + [
-            f"Option {chr(65 + i)}: {o}" for i, o in enumerate(opts)
+            f"Option {chr(65 + i)}: {o}" for i, o in enumerate(q.get("options") or [])
         ]
         docs.append("\n".join(lines))
     return docs
@@ -143,13 +130,13 @@ def _recent_tutor_responses(user_id: str, course_id: str) -> list[str]:
         .order("created_at", desc=True).limit(20).execute().data or []
     )
     ids = [s["id"] for s in sessions]
-    if not ids:
-        return _exam_question_texts(sb, user_id, course_id)
-    rows = (
-        sb.table("conversations").select("tutor_response").in_("session_id", ids)
-        .eq("user_id", user_id).order("created_at", desc=True).limit(_RECENT_TURNS)
-        .execute().data or []
-    )
+    rows = []
+    if ids:
+        rows = (
+            sb.table("conversations").select("tutor_response").in_("session_id", ids)
+            .eq("user_id", user_id).order("created_at", desc=True).limit(_RECENT_TURNS)
+            .execute().data or []
+        )
     return [r.get("tutor_response") or "" for r in rows] + _exam_question_texts(
         sb, user_id, course_id
     )
@@ -192,17 +179,21 @@ def narrate_board_slide(
     """
     require_enrolment(user, payload.course_id)
 
-    text = payload.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Nothing to say.")
-
-    if not text_matches_source(text, payload.source) or not source_is_tutor_text(
+    # One refusal for every reason, so the response says nothing about which
+    # check failed or whether a guessed passage exists.
+    if not source_is_tutor_text(
         payload.source, _recent_tutor_responses(user["id"], payload.course_id)
     ):
         raise HTTPException(
             status_code=403,
             detail="Only lesson content from your own tutor session can be narrated.",
         )
+
+    chunks = chunk_for_speech(spoken_answer(payload.source), MAX_TEXT_CHARS - 50)
+    if not chunks or payload.chunk >= len(chunks):
+        raise HTTPException(status_code=400, detail="Nothing to say.")
+    text = chunks[payload.chunk]
+    total = len(chunks)
 
     voice_id = voice_for_course(payload.course_id)
     if not voice_id:
@@ -227,7 +218,7 @@ def narrate_board_slide(
             _CACHE_PREFIX, {"search": path.rsplit("/", 1)[-1], "limit": 1}
         )
         if existing and cached:
-            return {"url": cached, "cached": True, "voice_id_hash": voice_id[:6]}
+            return {"url": cached, "cached": True, "total": total, "voice_id_hash": voice_id[:6]}
     except Exception as exc:  # noqa: BLE001
         logger.debug("Narration cache probe failed for %s: %s", path, exc)
 
@@ -261,4 +252,4 @@ def narrate_board_slide(
 
         return Response(content=audio, media_type="audio/mpeg")
 
-    return {"url": url, "cached": False}
+    return {"url": url, "cached": False, "total": total}
