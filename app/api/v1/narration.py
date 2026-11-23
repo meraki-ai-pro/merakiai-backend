@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -52,6 +53,106 @@ class BoardNarrationRequest(BaseModel):
     # — the same conversion the browser voice used, so both paths say "d y by
     # d x" rather than reading backslashes aloud.
     text: str = Field(..., min_length=1, max_length=MAX_TEXT_CHARS)
+    # The slide's raw markdown (title + body) the text was made from. The
+    # server checks it against what the tutor actually said to this student,
+    # so the endpoint cannot be used to put arbitrary sentences in a
+    # lecturer's cloned voice.
+    source: str = Field(..., min_length=1, max_length=8000)
+
+
+# Words the client's maths-to-speech conversion introduces. They never appear
+# in the markdown, so they must not count against the text.
+_SPOKEN_MATH_WORDS = frozenset(
+    "over squared cubed equals plus minus times divided power sub root square cube "
+    "integral integrals sum product limit approaches infinity choose less greater "
+    "than equal not approximately partial pi theta alpha beta mu sigma lambda delta "
+    "real numbers natural integers and so on see table board figure plus or is the of "
+    "to from as in dollars".split()
+)
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+_MIN_TEXT_COVERAGE = 0.8
+# Recent tutor turns searched for the slide. A lesson being listened to is
+# the one just given; this is generous without being an unbounded scan.
+_RECENT_TURNS = 60
+
+
+def _norm(s: str) -> str:
+    return " ".join(s.split())
+
+
+def source_is_tutor_text(source: str, tutor_responses: list[str]) -> bool:
+    """True when every line of ``source`` appears in one recent tutor answer."""
+    lines = [_norm(l) for l in source.splitlines()]
+    lines = [l for l in lines if l]
+    if not lines:
+        return False
+    corpus = [_norm(r) for r in tutor_responses if r]
+    return any(all(l in doc for l in lines) for doc in corpus)
+
+
+def text_matches_source(text: str, source: str) -> bool:
+    """True when the spoken text is made of the source's words.
+
+    The client converts LaTeX to words, so the text is not a substring of the
+    source; but its ordinary words must come from it. An arbitrary sentence
+    paired with a genuine slide fails here.
+    """
+    src_words = {w.lower() for w in _WORD_RE.findall(source)} | _SPOKEN_MATH_WORDS
+    words = [w.lower() for w in _WORD_RE.findall(text)]
+    if not words:
+        return True
+    hits = sum(1 for w in words if w in src_words)
+    return hits / len(words) >= _MIN_TEXT_COVERAGE
+
+
+def _exam_question_texts(sb, user_id: str, course_id: str) -> list[str]:
+    """Question text of exams this student may sit, formatted as the Listen
+    button reads it (prompt, then "Option A: ..." lines). Lecturer-authored
+    content, so it is safe to voice in the lecturer's voice."""
+    from app.api.v1.assessments import visible_to
+
+    papers = [
+        a for a in (
+            sb.table("assessments").select("*").eq("course_id", course_id)
+            .eq("is_published", True).limit(50).execute().data or []
+        )
+        if visible_to(a, user_id)
+    ]
+    if not papers:
+        return []
+    rows = (
+        sb.table("assessment_questions").select("prompt, options")
+        .in_("assessment_id", [a["id"] for a in papers]).limit(500).execute().data or []
+    )
+    docs = []
+    for q in rows:
+        opts = q.get("options") or []
+        lines = [q.get("prompt") or ""] + [
+            f"Option {chr(65 + i)}: {o}" for i, o in enumerate(opts)
+        ]
+        docs.append("\n".join(lines))
+    return docs
+
+
+def _recent_tutor_responses(user_id: str, course_id: str) -> list[str]:
+    from app.db.supabase import get_supabase
+
+    sb = get_supabase()
+    sessions = (
+        sb.table("sessions").select("id").eq("user_id", user_id).eq("course_id", course_id)
+        .order("created_at", desc=True).limit(20).execute().data or []
+    )
+    ids = [s["id"] for s in sessions]
+    if not ids:
+        return _exam_question_texts(sb, user_id, course_id)
+    rows = (
+        sb.table("conversations").select("tutor_response").in_("session_id", ids)
+        .eq("user_id", user_id).order("created_at", desc=True).limit(_RECENT_TURNS)
+        .execute().data or []
+    )
+    return [r.get("tutor_response") or "" for r in rows] + _exam_question_texts(
+        sb, user_id, course_id
+    )
 
 
 def _cache_path(voice_id: str, text: str) -> str:
@@ -94,6 +195,14 @@ def narrate_board_slide(
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Nothing to say.")
+
+    if not text_matches_source(text, payload.source) or not source_is_tutor_text(
+        payload.source, _recent_tutor_responses(user["id"], payload.course_id)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Only lesson content from your own tutor session can be narrated.",
+        )
 
     voice_id = voice_for_course(payload.course_id)
     if not voice_id:
