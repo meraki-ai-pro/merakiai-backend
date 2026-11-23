@@ -203,7 +203,14 @@ def _read_xlsx(content: bytes) -> list[list[str]]:
 
     try:
         sheet = workbook.active
-        return [_cells_to_text(list(row)) for row in sheet.iter_rows(values_only=True)]
+        rows = []
+        for row in sheet.iter_rows(values_only=True):
+            rows.append(_cells_to_text(list(row)))
+            # Stop reading a sheet padded with millions of empty rows; the
+            # caller rejects anything over MAX_ROWS anyway.
+            if len(rows) > MAX_ROWS + 50:
+                break
+        return rows
     finally:
         workbook.close()
 

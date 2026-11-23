@@ -53,10 +53,13 @@ _WS_MAX_MSGS_PER_MINUTE = 20
 _ws_msg_timestamps: dict[str, list[float]] = defaultdict(list)
 
 
-def _ws_rate_check(session_id: str) -> bool:
+def _ws_rate_check(session_id: str) -> bool:  # keyed by user id (see call site)
     """Return True if the message is allowed, False if rate-limited."""
     now = time.monotonic()
     cutoff = now - 60.0
+    if len(_ws_msg_timestamps) > 5000:
+        for k in [k for k, v in _ws_msg_timestamps.items() if not v or v[-1] <= cutoff]:
+            _ws_msg_timestamps.pop(k, None)
     ts = [t for t in _ws_msg_timestamps[session_id] if t > cutoff]
     _ws_msg_timestamps[session_id] = ts
     if len(ts) >= _WS_MAX_MSGS_PER_MINUTE:
@@ -222,7 +225,7 @@ async def websocket_endpoint(
                 continue
 
             # M-2: per-session sliding-window rate limit
-            if not _ws_rate_check(session_id):
+            if not _ws_rate_check(user_id):
                 await websocket.send_json({
                     "error": f"Rate limit exceeded. Max {_WS_MAX_MSGS_PER_MINUTE} messages per minute."
                 })
@@ -423,7 +426,9 @@ async def websocket_endpoint(
     except Exception as exc:
         logger.error("WS error  session=%s  error=%s", session_id, exc)
     finally:
-        _ws_rate_cleanup(session_id)  # M-2: release in-memory rate-limit state
+        # The limiter is keyed per user and deliberately NOT cleared on
+        # disconnect: reconnecting must not reset it. Stale users are pruned
+        # in _ws_rate_check instead.
         if ws_session_id:
             await asyncio.to_thread(analytics.close_ws_session, ws_session_id)
         await manager.disconnect(session_id)

@@ -13,10 +13,11 @@ the one place those enter the stream, and it is deliberately narrow:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.core import events
 from app.core.auth import auth_guard
@@ -32,6 +33,14 @@ class EventIn(BaseModel):
     topic: str | None = Field(None, max_length=200)
     session_id: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("payload")
+    @classmethod
+    def _payload_is_small(cls, v: dict[str, Any]) -> dict[str, Any]:
+        # An unbounded dict is stored as-is in the research table.
+        if len(json.dumps(v, default=str)) > 4000:
+            raise ValueError("payload is too large")
+        return v
 
 
 @router.post("")

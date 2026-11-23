@@ -17,6 +17,8 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
+from app.core.enrolment import require_enrolment
+
 from app.core.auth import assert_course_owner, auth_guard, lecturer_guard
 from app.db.supabase import get_supabase, get_user_client
 
@@ -65,6 +67,9 @@ class FeedbackIn(BaseModel):
 @router.post("")
 def submit_feedback(body: FeedbackIn, user=Depends(auth_guard)):
     """Record one piece of feedback. RLS pins user_id to the caller."""
+    if body.course_id:
+        # Feedback is about a course the caller is on, not any course id.
+        require_enrolment(user, body.course_id)
     row = {
         "user_id": user["id"],
         "role_at_time": user.get("role") or "user",

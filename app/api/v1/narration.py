@@ -65,25 +65,18 @@ def _norm(s: str) -> str:
 
 
 def source_is_tutor_text(source: str, tutor_responses: list[str]) -> bool:
-    """True when the lines of ``source`` appear, in order, in one answer.
+    """True when the whole of ``source`` is one contiguous passage of an answer.
 
-    Order matters: independent per-line matching would let someone reassemble
-    sentences from fragments scattered through a long answer.
+    Contiguity is the point. Matching lines (even in order) independently lets
+    someone assemble a new sentence from words scattered through a long answer;
+    a single unbroken passage can only be something the tutor said. A slide
+    whose prose is interrupted by a plot or video block will not match and is
+    read by the browser's voice instead.
     """
-    lines = [_norm(l) for l in source.splitlines()]
-    lines = [l for l in lines if l]
-    if not lines:
+    needle = _norm(source)
+    if not needle:
         return False
-    for doc in (_norm(r) for r in tutor_responses if r):
-        pos = 0
-        for line in lines:
-            found = doc.find(line, pos)
-            if found < 0:
-                break
-            pos = found + len(line)
-        else:
-            return True
-    return False
+    return any(needle in _norm(r) for r in tutor_responses if r)
 
 
 def _exam_question_texts(sb, user_id: str, course_id: str) -> list[str]:

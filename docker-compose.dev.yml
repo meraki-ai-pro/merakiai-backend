@@ -14,7 +14,7 @@
 services:
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
     command: redis-server --appendonly yes
     volumes: ["redis_data:/data"]
     restart: unless-stopped
@@ -27,8 +27,8 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     ports:
-      - "5672:5672"    # broker — what Celery connects to
-      - "15672:15672"  # management UI, http://localhost:15672 (admin / root1234)
+      - "127.0.0.1:5672:5672"    # broker — what Celery connects to (loopback only: known dev password)
+      - "127.0.0.1:15672:15672"  # management UI, http://localhost:15672 (admin / root1234)
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: root1234

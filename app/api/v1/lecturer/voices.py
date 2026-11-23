@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.core import audit
 from app.core.auth import assert_course_owner, lecturer_guard
+from app.core.rate_limit import rate_limit
 from app.db.supabase import get_supabase
 from app.media.voices import (
     ALLOWED_SAMPLE_TYPES,
@@ -174,7 +175,11 @@ async def create_voice(
 
 
 @router.post("/{voice_id}/preview")
-def preview_voice(voice_id: str, user=Depends(lecturer_guard)):
+def preview_voice(
+    voice_id: str,
+    user=Depends(lecturer_guard),
+    _rl=Depends(rate_limit(max_calls=10, window_seconds=60)),
+):
     """Speak a sample line so the lecturer can hear the clone before using it."""
     voice = _owned_voice(user, voice_id)
     if voice.get("status") != "ready" or not voice.get("provider_voice_id"):

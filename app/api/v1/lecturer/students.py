@@ -232,7 +232,14 @@ def change_status(
     elif payload.status == "withdrawn":
         updates["withdrawn_at"] = "now()"
 
-    sb.table("enrolments").update(updates).eq("id", enrolment_id).execute()
+    # A lecturer's withdrawal must survive the class invite code (sql/031).
+    # Written on a retry-able basis so this works before 031 is applied.
+    flagged = {**updates, "removed_by_staff": payload.status == "withdrawn"}
+    try:
+        sb.table("enrolments").update(flagged).eq("id", enrolment_id).execute()
+    except Exception as exc:  # noqa: BLE001 — column missing until sql/031
+        logger.warning("removed_by_staff not recorded (apply sql/031): %s", exc)
+        sb.table("enrolments").update(updates).eq("id", enrolment_id).execute()
 
     audit.record(
         actor=user, action=f"enrolment.{payload.status}", resource_type="enrolment",

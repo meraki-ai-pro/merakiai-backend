@@ -19,6 +19,11 @@ def test_reordered_fragments_are_rejected():
     assert not source_is_tutor_text("Bring the power down.\nThe Power Rule", TUTOR)
 
 
+def test_skipping_text_between_lines_is_rejected():
+    # Both lines exist, in order, but the tutor never said them back to back.
+    assert not source_is_tutor_text("The Power Rule\nBring the power down.", TUTOR)
+
+
 def test_whitespace_differences_are_tolerated():
     assert source_is_tutor_text("Bring   the power\ndown.", TUTOR)
 

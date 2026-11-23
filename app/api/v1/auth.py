@@ -31,6 +31,13 @@ recovery_security = HTTPBearer()
 # amr methods a Supabase recovery-link session carries. An ordinary login token
 # carries "password" (or "oauth"/"totp") and must not be able to set a password
 # without the current one: a leaked access token would otherwise be a takeover.
+def _email_tag(email: str) -> str:
+    """Short stable tag for logs; the address itself stays out of them."""
+    import hashlib
+
+    return hashlib.sha256((email or "").strip().lower().encode()).hexdigest()[:10]
+
+
 def _app_flag(user) -> bool | None:
     meta = getattr(user, "app_metadata", None) or {}
     return meta.get("must_change_password") if "must_change_password" in meta else None
@@ -191,7 +198,7 @@ def login(
             "options": {"captcha_token": payload.captcha_token},
         })
     except Exception as e:
-        logger.warning("Login failed for email=%s: %s", payload.email, e)
+        logger.warning("Login failed for account=%s: %s", _email_tag(payload.email), e)
         _raise_if_captcha(e)
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 

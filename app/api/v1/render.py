@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.core.auth import assert_course_owner, auth_guard, lecturer_guard
 from app.core.enrolment import require_enrolment
+from app.core.rate_limit import rate_limit
 from app.db.supabase import get_supabase
 from app.media.render.routing import (
     UnsupportedArchetypeError,
@@ -102,7 +103,11 @@ def _course_subject(course_id: str) -> str | None:
 
 
 @router.post("")
-def create_render(payload: RenderRequestPayload, user=Depends(lecturer_guard)):
+def create_render(
+    payload: RenderRequestPayload,
+    user=Depends(lecturer_guard),
+    _rl=Depends(rate_limit(max_calls=10, window_seconds=60)),
+):
     """Queue a concept video. Returns immediately — renders take minutes.
 
     A repeat request for an unchanged script is a cache hit, not a second job.
