@@ -33,6 +33,11 @@ from celery import shared_task
 import psutil
 
 
+BACKEND = Path(__file__).resolve().parents[1]
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+
 DEFAULT_COHORTS = (25, 50, 100, 200)
 PROBE_QUEUE = "uat_ai_probe"
 PROBE_TASK = "scripts.run_uat_ai_workload.probe"
@@ -267,8 +272,8 @@ def _stop_worker(process: subprocess.Popen) -> None:
 
 
 def _delete_probe_queue() -> bool:
-    app = _celery_app()
     try:
+        app = _celery_app()
         with app.connection_for_write() as connection:
             connection.default_channel.queue_delete(queue=PROBE_QUEUE)
         return True

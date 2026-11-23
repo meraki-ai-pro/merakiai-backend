@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import math
+import sys
 
 import pytest
 
 from scripts.run_uat_ai_workload import (
+    BACKEND,
     StageResult,
     parse_args,
     percentile,
     task_count_for,
     workload_kinds,
 )
+
+
+def test_runner_adds_project_root_when_started_by_ssm_from_another_directory():
+    assert str(BACKEND) in sys.path
 
 
 def test_active_population_is_converted_to_ai_burst_size():
