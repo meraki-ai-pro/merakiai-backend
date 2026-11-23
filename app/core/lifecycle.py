@@ -108,7 +108,13 @@ def restore(user_id: str) -> dict:
     a worse error than making them redeem an invite code again.
     """
     sb = get_supabase()
-    sb.auth.admin.update_user_by_id(user_id, {"ban_duration": "none"})
+    # Only lift a ban this module could have set: an account that is not
+    # soft-deleted may be banned for another reason (a super admin's action).
+    row = sb.table("users").select("deleted_at").eq("id", user_id).execute().data
+    if not row:
+        raise LookupError(f"No user {user_id}")
+    if row[0].get("deleted_at"):
+        sb.auth.admin.update_user_by_id(user_id, {"ban_duration": "none"})
     updated = sb.table("users").update({
         "deleted_at": None, "deletion_requested_at": None, "purge_after": None,
     }).eq("id", user_id).execute().data

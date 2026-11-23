@@ -46,6 +46,7 @@ def test_soft_delete_bans_the_auth_user(monkeypatch):
 def test_restore_unbans(monkeypatch):
     sb = MagicMock()
     sb.table().update().eq().execute.return_value.data = [{"id": "u"}]
+    sb.table().select().eq().execute.return_value.data = [{"deleted_at": "2026-01-01"}]
     monkeypatch.setattr(lifecycle, "get_supabase", lambda: sb)
     lifecycle.restore("u")
     sb.auth.admin.update_user_by_id.assert_called_with("u", {"ban_duration": "none"})
@@ -65,4 +66,11 @@ def test_video_stream_requires_session_owner(monkeypatch):
     monkeypatch.setattr(video, "get_async_supabase", get_sb)
     with pytest.raises(HTTPException) as e:
         asyncio.run(video._assert_session_owner("s", {"id": "me"}))
+    assert e.value.status_code == 404
+
+
+def test_stream_id_must_match_cached_stream():
+    video._require_stream_id({"stream_id": "a"}, "a")
+    with pytest.raises(HTTPException) as e:
+        video._require_stream_id({"stream_id": "a"}, "b")
     assert e.value.status_code == 404

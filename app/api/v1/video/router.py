@@ -112,6 +112,12 @@ async def _assert_session_owner(session_id: str, user: dict) -> None:
         raise HTTPException(status_code=404, detail="Session not found.")
 
 
+def _require_stream_id(stream_info: dict, stream_id: str) -> None:
+    """The path's stream id must be the one cached for the (owned) session."""
+    if stream_info.get("stream_id") != stream_id:
+        raise HTTPException(status_code=404, detail="Stream not found for this session.")
+
+
 def _require_stream(session_id: str) -> dict:
     stream_info = get_cached_stream(session_id)
     if not stream_info:
@@ -171,6 +177,7 @@ async def submit_stream_sdp(
     """
     await _assert_session_owner(payload.session_id, user)
     stream_info = _require_stream(payload.session_id)
+    _require_stream_id(stream_info, stream_id)
 
     try:
         await asyncio.to_thread(
@@ -200,6 +207,7 @@ async def submit_stream_ice(
     """
     await _assert_session_owner(payload.session_id, user)
     stream_info = _require_stream(payload.session_id)
+    _require_stream_id(stream_info, stream_id)
 
     try:
         await asyncio.to_thread(
@@ -231,6 +239,7 @@ async def close_video_stream(
     await _assert_session_owner(session_id, user)
     stream_info = get_cached_stream(session_id)
     if stream_info:
+        _require_stream_id(stream_info, stream_id)
         await asyncio.to_thread(
             close_stream,
             stream_info["agent_id"],
