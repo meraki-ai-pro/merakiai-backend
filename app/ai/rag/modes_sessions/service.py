@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Tuple, Optional, Callable, Awaitable
 
 from app.ai.rag.claude import generate_response
 from app.ai.rag.retriever import retrieve_context
+from app.ai.rag.untrusted import UNTRUSTED_RULE, fence
 from app.core import mastery
 
 # The session_type an Assessment (application) session carries now that the
@@ -200,7 +201,7 @@ Rules:
 
 def _make_system(text: str) -> list:
     """Wrap a system prompt string in the cache_control block expected by the SDK."""
-    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+    return [{"type": "text", "text": text + UNTRUSTED_RULE, "cache_control": {"type": "ephemeral"}}]
 
 
 # -------------------------
@@ -709,7 +710,7 @@ async def evaluate_review_answer(
             f"Statement:\n{qblock}\n\n"
             f"Correct answer: {correct_label}\n"
             f"Explanation: {explanation}\n\n"
-            f"Student Answer:\n{student_answer}\n\n"
+            f"Student Answer:\n{fence(student_answer)}\n\n"
             f"REFERENCE MATERIAL:\n{reference}"
             + known
         )
@@ -778,7 +779,7 @@ async def evaluate_review_answer(
         f"Course: {course_name}\n"
         f"Item Type: {itype}\n\n"
         f"Prompt/Question:\n{qblock}\n\n"
-        f"Student Answer:\n{student_answer}\n\n"
+        f"Student Answer:\n{fence(student_answer)}\n\n"
         f"Expected points (if provided):\n{json.dumps(expected_points)}\n\n"
         f"REFERENCE MATERIAL:\n{reference}"
         + known

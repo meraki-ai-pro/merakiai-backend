@@ -1,4 +1,5 @@
 from app.ai.rag import help_ladder
+from app.ai.rag.untrusted import UNTRUSTED_RULE, fence
 
 _DEFAULT_PERSONA = """
 You are an expert tutor and instructor.
@@ -203,6 +204,7 @@ Rules:
     scaffolding = scaffolding_for(academic_level)
     return (
         f"{system_persona}\n\n{domain_constraint}\n\n{mode_instruction}\n\n{scaffolding}"
+        f"\n{UNTRUSTED_RULE}"
     ).strip()
 
 
@@ -406,7 +408,7 @@ def build_system_and_user(
     memory_block = ""
     if memory:
         formatted_memory = "\n".join(memory[-6:])
-        memory_block = f"\nCONVERSATION MEMORY:\n{formatted_memory}\n"
+        memory_block = f"\nCONVERSATION MEMORY:\n{fence(formatted_memory)}\n"
 
     reference_block = _build_reference_block(context, sources)
 
@@ -437,7 +439,7 @@ def build_system_and_user(
 
     user_text = (
         f"{memory_block}{ladder_block}\n{reference_block}\n{format_block}\n"
-        f"STUDENT QUESTION:\n{user_message}"
+        f"STUDENT QUESTION:\n{fence(user_message)}"
     ).strip()
 
     return system_text, user_text
