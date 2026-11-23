@@ -11,6 +11,7 @@ clamped and need instructor release, and narration is bound to tutor text.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 TAG = "untrusted_student_text"
 
@@ -41,17 +42,31 @@ _SUSPICIOUS = re.compile(
 )
 
 
-def fence(text: str) -> str:
-    """Wrap student text in the untrusted delimiter, defanging any copy of it
-    inside the text so the student cannot close the block early."""
-    cleaned = text or ""
+def _normalise(text: str) -> str:
+    """The form both the fence and the detector work on.
+
+    NFKC folds look-alike and full-width characters to plain ones, and
+    zero-width / other format characters (category Cf) are dropped, so neither
+    a hidden character inside "ignore" nor a full-width "<" can slip past.
+    """
+    text = unicodedata.normalize("NFKC", text or "")
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+
+
+def _strip_tags(text: str) -> str:
     # Repeat until stable: one pass can splice a new tag together out of the
     # pieces on either side of a removed one.
     while True:
-        stripped = _TAG_RE.sub("", cleaned)
-        if stripped == cleaned:
-            break
-        cleaned = stripped
+        stripped = _TAG_RE.sub("", text)
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def fence(text: str) -> str:
+    """Wrap student text in the untrusted delimiter, defanging any copy of it
+    inside the text so the student cannot close the block early."""
+    cleaned = _strip_tags(_normalise(text))
     # No angle bracket survives, so nothing tag-shaped can be built from the
     # remainder either. Maths like x < y reads fine with the look-alikes.
     cleaned = cleaned.replace("<", "‹").replace(">", "›")
@@ -59,4 +74,10 @@ def fence(text: str) -> str:
 
 
 def looks_like_injection(text: str) -> bool:
-    return bool(_SUSPICIOUS.search(text or ""))
+    """Checked on the normalised text, i.e. what the model would actually see.
+    An answer that contains the delimiter itself is flagged outright: no honest
+    answer has a reason to."""
+    normalised = _normalise(text)
+    if _TAG_RE.search(normalised):
+        return True
+    return bool(_SUSPICIOUS.search(_strip_tags(normalised)))
