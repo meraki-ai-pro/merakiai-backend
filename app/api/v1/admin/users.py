@@ -18,7 +18,7 @@ _POSTGREST_METACHAR_RE = re.compile(r"[,.()\[\]{}]")
 router = APIRouter(prefix="/users", tags=["Admin – Users"])
 
 # Supabase Auth has no "ban forever"; a century is the conventional stand-in.
-_BAN_FOREVER = "876000h"
+from app.core.lifecycle import BAN_FOREVER as _BAN_FOREVER  # noqa: E402
 
 # Ordering is for display and coarse comparison only. 'lecturer' is not
 # "more than a student" in an authority sense — it is a different capability

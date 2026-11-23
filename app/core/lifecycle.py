@@ -26,6 +26,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.db.supabase import get_supabase
+
+# Same value /admin/users uses, so both delete paths ban identically.
+BAN_FOREVER = "876000h"
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,11 @@ def soft_delete(user_id: str, *, requested_by: str, reason: str | None = None) -
     now = datetime.now(timezone.utc)
     purge_after = now + timedelta(days=RETENTION_DAYS)
 
+    # Ban first, as /admin/users does: the soft-delete flag alone never stopped
+    # a valid JWT or a refresh. If the ban fails the whole call fails and the
+    # account is left untouched, rather than shown "deleted" while still usable.
+    sb.auth.admin.update_user_by_id(user_id, {"ban_duration": BAN_FOREVER})
+
     sb.table("users").update({
         "deleted_at": now.isoformat(),
         "deletion_requested_at": now.isoformat(),
@@ -74,13 +82,6 @@ def soft_delete(user_id: str, *, requested_by: str, reason: str | None = None) -
         }).eq("student_id", user_id).execute()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not withdraw enrolments for %s: %s", user_id, exc)
-
-    # Revoke live sessions. Best-effort: the account is already soft-deleted,
-    # and auth_guard will refuse it on the next request regardless.
-    try:
-        sb.auth.admin.sign_out(user_id)  # type: ignore[attr-defined]
-    except Exception as exc:  # noqa: BLE001
-        logger.info("Session revocation unavailable for %s: %s", user_id, exc)
 
     _record(
         subject_user_id=user_id,
@@ -107,6 +108,7 @@ def restore(user_id: str) -> dict:
     a worse error than making them redeem an invite code again.
     """
     sb = get_supabase()
+    sb.auth.admin.update_user_by_id(user_id, {"ban_duration": "none"})
     updated = sb.table("users").update({
         "deleted_at": None, "deletion_requested_at": None, "purge_after": None,
     }).eq("id", user_id).execute().data

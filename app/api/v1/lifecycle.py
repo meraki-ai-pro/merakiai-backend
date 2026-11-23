@@ -113,6 +113,23 @@ def request_deletion(
 
 # ── Admin ───────────────────────────────────────────────────────────────────
 
+def _require_may_manage(actor: dict, target_id: str, *, deleting: bool = False) -> None:
+    """Same hierarchy as /admin/users: only a super_admin touches admin tiers,
+    and nobody soft-deletes a super_admin without demoting them first."""
+    rows = (
+        get_supabase().table("users").select("role").eq("id", target_id).execute().data
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="User not found")
+    target_role = rows[0].get("role")
+    if deleting and target_role == "super_admin":
+        raise HTTPException(
+            status_code=400, detail="Demote a super admin before deleting their account"
+        )
+    if target_role in ("admin", "super_admin") and actor.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="Only super admins can manage admin accounts")
+
+
 @router.post("/admin/{user_id}/delete")
 def admin_delete(
     user_id: str,
@@ -125,6 +142,7 @@ def admin_delete(
         raise HTTPException(status_code=400, detail="Confirmation phrase required.")
     if user_id == user["id"]:
         raise HTTPException(status_code=400, detail="Use /account/delete for your own account.")
+    _require_may_manage(user, user_id, deleting=True)
 
     try:
         result = lifecycle.soft_delete(user_id, requested_by=user["id"], reason=body.reason)
@@ -139,7 +157,13 @@ def admin_delete(
 
 
 @router.post("/admin/{user_id}/restore")
-def admin_restore(user_id: str, request: Request, user=Depends(admin_guard)):
+def admin_restore(
+    user_id: str,
+    request: Request,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
+    _require_may_manage(user, user_id)
     try:
         result = lifecycle.restore(user_id)
     except LookupError as exc:

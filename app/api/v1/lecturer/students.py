@@ -18,6 +18,7 @@ from app.core import audit
 from app.core.auth import assert_course_owner, lecturer_guard
 from app.core.enrolment import ALL_STATUSES, generate_invite_code
 from app.core.roster import RosterFormatError, parse_roster
+from app.api.v1.lecturer.data_center import safe_cell
 from app.db.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
@@ -492,9 +493,10 @@ def export_students(course_id: str, user=Depends(lecturer_guard)):
     writer.writerow(["email", "first_name", "last_name", "status", "enrolled_at", "completed_at"])
     for e in enrolments:
         p = by_id.get(e["student_id"], {})
-        writer.writerow([
+        # Names are self-supplied at signup, so they are untrusted in Excel.
+        writer.writerow([safe_cell(v) for v in (
             p.get("email", ""), p.get("first_name", ""), p.get("last_name", ""),
             e["status"], e.get("enrolled_at", ""), e.get("completed_at", "") or "",
-        ])
+        )])
 
     return {"filename": f"{course_id}-students.csv", "csv": buf.getvalue()}

@@ -143,7 +143,7 @@ def _fetch_role(token: str, user_id: str) -> str:
     profile = (
         get_user_client(token)
         .table("users")
-        .select("id, role")
+        .select("id, role, deleted_at")
         .eq("id", user_id)
         .single()
         .execute()
@@ -152,6 +152,10 @@ def _fetch_role(token: str, user_id: str) -> str:
     if not profile:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="User profile not found"
+        )
+    if profile.get("deleted_at"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="This account has been deactivated."
         )
     return profile["role"]
 

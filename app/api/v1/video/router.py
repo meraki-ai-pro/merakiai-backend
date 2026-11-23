@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.core.auth import auth_guard
-from app.db.supabase import get_user_client
+from app.db.supabase import get_async_supabase, get_user_client
 from app.media.did_agent_service import (
     DidAgentError,
     cache_stream,
@@ -100,6 +100,18 @@ async def _get_presenter_id(user: dict) -> str:
     return bundle_res.data[0]["did_presenter_id"]
 
 
+async def _assert_session_owner(session_id: str, user: dict) -> None:
+    """404 unless the caller owns the session. The stream cache is keyed by
+    session id alone, so without this anyone could overwrite, drive or close
+    another user's avatar stream."""
+    supabase = await get_async_supabase()
+    res = await (
+        supabase.table("sessions").select("user_id").eq("id", session_id).execute()
+    )
+    if not res.data or res.data[0].get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+
 def _require_stream(session_id: str) -> dict:
     stream_info = get_cached_stream(session_id)
     if not stream_info:
@@ -126,6 +138,7 @@ async def create_video_stream(
     connection with D-ID.  The stream info is cached server-side so that
     later speak() calls from Celery workers can find it by session_id.
     """
+    await _assert_session_owner(payload.session_id, user)
     presenter_id = await _get_presenter_id(user)
 
     try:
@@ -156,6 +169,7 @@ async def submit_stream_sdp(
 
     Call this after RTCPeerConnection.createAnswer() to complete the handshake.
     """
+    await _assert_session_owner(payload.session_id, user)
     stream_info = _require_stream(payload.session_id)
 
     try:
@@ -184,6 +198,7 @@ async def submit_stream_ice(
 
     Collect candidates from RTCPeerConnection.onicecandidate and POST each one.
     """
+    await _assert_session_owner(payload.session_id, user)
     stream_info = _require_stream(payload.session_id)
 
     try:
@@ -213,6 +228,7 @@ async def close_video_stream(
 
     Call on session end or when the user navigates away.
     """
+    await _assert_session_owner(session_id, user)
     stream_info = get_cached_stream(session_id)
     if stream_info:
         await asyncio.to_thread(
