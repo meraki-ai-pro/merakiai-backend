@@ -44,7 +44,17 @@ _SUSPICIOUS = re.compile(
 def fence(text: str) -> str:
     """Wrap student text in the untrusted delimiter, defanging any copy of it
     inside the text so the student cannot close the block early."""
-    cleaned = _TAG_RE.sub("", text or "")
+    cleaned = text or ""
+    # Repeat until stable: one pass can splice a new tag together out of the
+    # pieces on either side of a removed one.
+    while True:
+        stripped = _TAG_RE.sub("", cleaned)
+        if stripped == cleaned:
+            break
+        cleaned = stripped
+    # No angle bracket survives, so nothing tag-shaped can be built from the
+    # remainder either. Maths like x < y reads fine with the look-alikes.
+    cleaned = cleaned.replace("<", "‹").replace(">", "›")
     return f"<{TAG}>\n{cleaned}\n</{TAG}>"
 
 
