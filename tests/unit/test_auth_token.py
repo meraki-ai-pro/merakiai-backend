@@ -19,6 +19,7 @@ def test_validate_token_accepts_a_pinned_hs256_supabase_token(monkeypatch):
     token = jwt.encode(
         {
             "sub": "user-123",
+            "aud": "authenticated",
             "email": "student@example.com",
             "aal": "aal2",
             "exp": datetime.now(UTC) + timedelta(minutes=5),
@@ -72,6 +73,7 @@ def test_temporary_password_token_is_limited_to_the_password_change_flow(monkeyp
     token = jwt.encode(
         {
             "sub": "lecturer-123",
+            "aud": "authenticated",
             "email": "lecturer@example.com",
             "user_metadata": {"must_change_password": True},
             "exp": datetime.now(UTC) + timedelta(minutes=5),

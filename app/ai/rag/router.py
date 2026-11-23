@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from celery.result import AsyncResult
@@ -19,6 +20,8 @@ from app.media.stt_service import transcribe_audio
 from app.models.models import RagTurnRequest
 from app.ai.tasks import process_rag_turn_task
 from app.core.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
 
@@ -167,7 +170,9 @@ async def get_task_status(task_id: str, user=Depends(auth_guard)):
         if res.successful():
             return res.result
         else:
-            return {"status": "failed", "error": str(res.result)}
+            # Internal exception text can name hosts, keys or SQL; log, don't return.
+            logger.warning("Task %s failed: %s", task_id, res.result)
+            return {"status": "failed", "error": "The request failed. Please try again."}
     return {"status": "processing"}
 
 

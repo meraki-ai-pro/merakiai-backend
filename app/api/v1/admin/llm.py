@@ -5,7 +5,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from app.core.auth import admin_guard
+from app.core.auth import admin_guard, require_mfa_if_enrolled
 from app.core.llm_config import (
     DEFAULTS,
     VALID_MODES,
@@ -43,7 +43,12 @@ def get_llm_config(_user=Depends(admin_guard)):
 
 
 @router.patch("/config/{mode}")
-def update_llm_mode_config(mode: str, payload: ModeConfigUpdate, _user=Depends(admin_guard)):
+def update_llm_mode_config(
+    mode: str,
+    payload: ModeConfigUpdate,
+    _user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
     """Override LLM settings for a specific mode. Changes persist in llm_config.json."""
     if mode not in VALID_MODES:
         raise HTTPException(status_code=400, detail=f"Mode must be one of {sorted(VALID_MODES)}")

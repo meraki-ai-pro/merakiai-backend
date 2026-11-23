@@ -74,3 +74,33 @@ def test_stream_id_must_match_cached_stream():
     with pytest.raises(HTTPException) as e:
         video._require_stream_id({"stream_id": "a"}, "b")
     assert e.value.status_code == 404
+
+
+# --- batch 3 -----------------------------------------------------------------
+from types import SimpleNamespace  # noqa: E402
+
+from app.core import auth as core_auth  # noqa: E402
+
+
+def _flag(monkeypatch, claims):
+    monkeypatch.setattr(core_auth, "_decode_access_token", lambda t: {"sub": "u", **claims})
+    return core_auth._validate_token(
+        SimpleNamespace(credentials="t"), allow_password_change=True
+    ).must_change_password
+
+
+def test_flag_in_app_metadata_cannot_be_cleared_via_user_metadata(monkeypatch):
+    assert _flag(monkeypatch, {"app_metadata": {"must_change_password": True},
+                               "user_metadata": {"must_change_password": False}}) is True
+
+
+def test_flag_falls_back_to_user_metadata_for_old_accounts(monkeypatch):
+    assert _flag(monkeypatch, {"user_metadata": {"must_change_password": True}}) is True
+    assert _flag(monkeypatch, {}) is False
+
+
+def test_vercel_regex_is_escaped():
+    import re
+    pat = rf"https://{re.escape('my.app')}-[a-z0-9-]+\.vercel\.app"
+    assert re.fullmatch(pat, "https://my.app-git-x.vercel.app")
+    assert not re.fullmatch(pat, "https://myXapp-git-x.vercel.app")

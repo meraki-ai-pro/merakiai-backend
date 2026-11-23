@@ -146,7 +146,9 @@ async def upload_knowledge(
             detail=f"Unsupported file type '.{ext}'. Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
         )
 
-    contents = await file.read()
+    # Read one byte past the cap so an oversized upload is refused without
+    # buffering all of it.
+    contents = await file.read(_MAX_UPLOAD_BYTES + 1)
     if len(contents) > _MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,

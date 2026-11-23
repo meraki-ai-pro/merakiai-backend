@@ -3,6 +3,7 @@
 # Supabase keys). If load_env() ran after those imports the values would be
 # empty strings even with a valid .env / AWS secret in place.
 import os  # noqa: E402 (intentional early import)
+import re  # noqa: E402
 from app.config import load_env
 load_env()
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,10 +50,17 @@ async def lifespan(app: FastAPI):
         await manager.disconnect(session_id)
 
 
+# Interactive API docs list every route, including admin ones, to anonymous
+# visitors; keep them for development only.
+_is_prod = os.getenv("APP_ENV", "development").strip().lower() == "production"
+
 app = FastAPI(
     title="Meraki AI - AI Instructor",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None if _is_prod else "/docs",
+    redoc_url=None if _is_prod else "/redoc",
+    openapi_url=None if _is_prod else "/openapi.json",
 )
 
 _raw_origins = os.getenv(
@@ -69,7 +77,7 @@ _environment = os.getenv("APP_ENV", "development").strip().lower()
 # Set to empty string to disable preview-deployment CORS entirely.
 _vercel_app = os.getenv("VERCEL_APP_NAME", "")  # e.g. "meraki-ai"
 _vercel_origin_regex = (
-    rf"https://{_vercel_app}-.*\.vercel\.app" if _vercel_app else None
+    rf"https://{re.escape(_vercel_app)}-[a-z0-9-]+\.vercel\.app" if _vercel_app else None
 )
 
 # L-2: Reject requests with unrecognised Host headers (Host-injection hardening).

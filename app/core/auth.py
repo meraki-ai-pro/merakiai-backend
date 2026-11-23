@@ -54,7 +54,7 @@ def _decode_access_token(token: str) -> dict:
             token,
             secret,
             algorithms=[_ALGORITHM],
-            options={"verify_aud": False},
+            audience="authenticated",
         )
 
     if algorithm in _ASYMMETRIC_ALGORITHMS:
@@ -106,7 +106,17 @@ def _validate_token(
     # session, "aal1" otherwise. Surfaced so endpoints can require step-up.
     aal: str = payload.get("aal", "aal1")
     user_metadata = payload.get("user_metadata") or {}
-    must_change_password = bool(user_metadata.get("must_change_password"))
+    # app_metadata is writable only with the service role; user_metadata is
+    # editable by the user via supabase.auth.updateUser, so a flag kept only
+    # there can be cleared by the very person it is meant to constrain.
+    # app_metadata wins whenever it carries the flag; user_metadata remains a
+    # fallback for accounts provisioned before this change.
+    app_metadata = payload.get("app_metadata") or {}
+    must_change_password = bool(
+        app_metadata["must_change_password"]
+        if "must_change_password" in app_metadata
+        else user_metadata.get("must_change_password")
+    )
 
     if not user_id:
         raise HTTPException(

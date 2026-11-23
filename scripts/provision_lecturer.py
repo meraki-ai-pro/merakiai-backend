@@ -112,7 +112,11 @@ def main() -> int:
 
     if existing:
         auth_user_id = existing.id
-        update = {"email_confirm": True, "user_metadata": metadata}
+        update = {
+            "email_confirm": True,
+            "user_metadata": metadata,
+            "app_metadata": {"must_change_password": True},
+        }
         if args.rotate_existing:
             update["password"] = temporary_password
         client.auth.admin.update_user_by_id(auth_user_id, update)
@@ -124,6 +128,7 @@ def main() -> int:
                 "password": temporary_password,
                 "email_confirm": True,
                 "user_metadata": metadata,
+                "app_metadata": {"must_change_password": True},
             }
         )
         auth_user_id = response.user.id

@@ -52,7 +52,7 @@ def test_validate_token_accepts_supabase_es256_signing_keys(monkeypatch):
 def test_validate_token_keeps_legacy_hs256_compatibility(monkeypatch):
     secret = "legacy-test-secret-with-enough-entropy"
     token = jwt.encode(
-        {"sub": "legacy-user", "email": "legacy@example.test"},
+        {"sub": "legacy-user", "aud": "authenticated", "email": "legacy@example.test"},
         secret,
         algorithm="HS256",
     )

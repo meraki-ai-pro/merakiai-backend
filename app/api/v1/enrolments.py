@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from app.core import events
+from app.core.rate_limit import rate_limit
 from app.core.auth import auth_guard
 from app.core.enrolment import redeem_code
 from app.db.supabase import get_user_client
@@ -22,7 +23,11 @@ class JoinPayload(BaseModel):
 
 
 @router.post("/join")
-def join_course(payload: JoinPayload, user=Depends(auth_guard)):
+def join_course(
+    payload: JoinPayload,
+    user=Depends(auth_guard),
+    _rl=Depends(rate_limit(max_calls=10, window_seconds=60)),
+):
     """Redeem an invite code.
 
     All validation, the uses_count increment and the enrolment insert happen

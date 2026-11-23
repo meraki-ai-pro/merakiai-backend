@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core import assignments, events
+from app.core.rate_limit import rate_limit
 from app.core.auth import auth_guard
 from app.core.enrolment import (
     PARTICIPATING_STATUSES,
@@ -222,7 +223,11 @@ def list_courses(user=Depends(auth_guard)):
 
 
 @router.post("/")
-def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
+def create_session(
+    payload: SessionCreateRequest,
+    user=Depends(auth_guard),
+    _rl=Depends(rate_limit(max_calls=30, window_seconds=60)),
+):
     supabase = get_user_client(user["token"])
 
     course = supabase.table("courses").select("id").eq("id", payload.course_id).execute()

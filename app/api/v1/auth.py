@@ -31,6 +31,11 @@ recovery_security = HTTPBearer()
 # amr methods a Supabase recovery-link session carries. An ordinary login token
 # carries "password" (or "oauth"/"totp") and must not be able to set a password
 # without the current one: a leaked access token would otherwise be a takeover.
+def _app_flag(user) -> bool | None:
+    meta = getattr(user, "app_metadata", None) or {}
+    return meta.get("must_change_password") if "must_change_password" in meta else None
+
+
 _RECOVERY_AMR_METHODS = {"recovery", "otp", "magiclink"}
 
 
@@ -198,7 +203,9 @@ def login(
     return {
         "user": {"id": res.user.id, "email": res.user.email},
         "must_change_password": bool(
-            (getattr(res.user, "user_metadata", None) or {}).get("must_change_password")
+            _app_flag(res.user)
+            if _app_flag(res.user) is not None
+            else (getattr(res.user, "user_metadata", None) or {}).get("must_change_password")
         ),
         "access_token": res.session.access_token,
         "refresh_token": res.session.refresh_token,
@@ -245,7 +252,11 @@ def reset_password(
         metadata["must_change_password"] = False
         get_supabase().auth.admin.update_user_by_id(
             user_id,
-            {"password": payload.new_password, "user_metadata": metadata},
+            {
+                "password": payload.new_password,
+                "user_metadata": metadata,
+                "app_metadata": {"must_change_password": False},
+            },
         )
     except Exception as e:
         logger.warning("Password recovery failed: %s", e)
@@ -419,7 +430,11 @@ def update_password(
         metadata["must_change_password"] = False
         get_supabase().auth.admin.update_user_by_id(
             user["id"],
-            {"password": payload.new_password, "user_metadata": metadata},
+            {
+                "password": payload.new_password,
+                "user_metadata": metadata,
+                "app_metadata": {"must_change_password": False},
+            },
         )
     except Exception as e:
         logger.error("Password update failed for user_id=%s: %s", user["id"], e)

@@ -42,7 +42,7 @@ async def upload_document(
         )
 
     # M-4: read the full file once, enforce size limit, then validate magic bytes
-    contents = await file.read()
+    contents = await file.read(_MAX_UPLOAD_BYTES + 1)
     if len(contents) > _MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,

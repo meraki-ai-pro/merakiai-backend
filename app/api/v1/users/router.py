@@ -84,7 +84,7 @@ async def upload_profile_picture(
             detail=f"Unsupported image type '{content_type}'. Allowed: JPEG, PNG, WebP.",
         )
 
-    image_bytes = await file.read()
+    image_bytes = await file.read(_MAX_PROFILE_PIC_BYTES + 1)
 
     if len(image_bytes) > _MAX_PROFILE_PIC_BYTES:
         raise HTTPException(
