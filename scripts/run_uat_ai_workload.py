@@ -483,7 +483,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--cohorts", nargs="+", type=int, default=list(DEFAULT_COHORTS))
     parser.add_argument("--active-ratio", type=float, default=0.20)
     parser.add_argument("--review-ratio", type=float, default=0.20)
-    parser.add_argument("--worker-concurrency", type=int, default=2)
+    parser.add_argument("--worker-concurrency", type=int, default=8)
     parser.add_argument("--stage-timeout-seconds", type=float, default=900)
     parser.add_argument("--course-id", default="calculus-100")
     parser.add_argument("--course-name", default="Introduction to Calculus")

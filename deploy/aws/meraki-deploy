@@ -57,6 +57,22 @@ render_compose() {
       --file "$render_compose_file" "$@"
 }
 
+refresh_service_units() {
+  local source_dir="$1"
+  local service unit
+
+  for service in "${services[@]}"; do
+    unit="$source_dir/deploy/aws/systemd/${service}.service"
+    if [[ ! -r "$unit" ]]; then
+      echo "Systemd unit is missing: $unit" >&2
+      return 78
+    fi
+    install -o root -g root -m 0644 "$unit" \
+      "/etc/systemd/system/${service}.service"
+  done
+  systemctl daemon-reload
+}
+
 refresh_uat_edge() {
   local source_dir="$1"
   local runtime_env="/etc/meraki/backend-uat.env"
@@ -138,6 +154,7 @@ rollback() {
     sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$previous_sha"
     sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
       --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
+    refresh_service_units "$APP_DIR" || true
     if [[ "$environment" == "uat" ]]; then
       refresh_uat_edge "$APP_DIR" || true
       systemctl restart nginx || true
@@ -170,6 +187,7 @@ sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$commit_sha"
 switched=1
 sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
   --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
+refresh_service_units "$APP_DIR"
 
 if [[ "$environment" == "uat" ]]; then
   refresh_uat_edge "$APP_DIR"

@@ -26,6 +26,11 @@ def test_active_population_is_converted_to_ai_burst_size():
     assert task_count_for(3, 0.01) == 1
 
 
+def test_default_worker_capacity_matches_release_service_units():
+    args = parse_args(["--secret-id", "uat/test"])
+    assert args.worker_concurrency == 8
+
+
 def test_workload_mix_includes_real_marking_without_changing_total():
     kinds = workload_kinds(40, 0.20)
     assert len(kinds) == 40

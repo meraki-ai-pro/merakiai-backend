@@ -32,12 +32,32 @@ def test_api_and_nginx_keep_uvicorn_private():
     assert "ssl_protocols TLSv1.2 TLSv1.3" in nginx
 
 
+def test_text_workers_have_capacity_for_the_200_student_ai_burst():
+    production = (SYSTEMD_DIR / "meraki-celery-text.service").read_text()
+    uat = (SYSTEMD_DIR / "meraki-celery-text-uat.service").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "--concurrency=8" in production
+    assert "--concurrency=8" in uat
+    assert "UAT_AI_WORKER_CONCURRENCY || '8'" in workflow
+    assert "--worker-concurrency $AI_WORKER_CONCURRENCY" in workflow
+
+
 def test_deploy_validates_against_the_branch_it_just_fetched():
     deploy = (ROOT / "deploy" / "aws" / "meraki-deploy").read_text()
 
     assert 'fetch --prune "$GIT_REMOTE" "$GIT_BRANCH"' in deploy
     assert '"$commit_sha" FETCH_HEAD' in deploy
     assert '"$GIT_REMOTE/$GIT_BRANCH"' not in deploy
+
+
+def test_deploy_refreshes_and_rolls_back_service_units():
+    deploy = (ROOT / "deploy" / "aws" / "meraki-deploy").read_text()
+
+    assert "refresh_service_units()" in deploy
+    assert 'unit="$source_dir/deploy/aws/systemd/${service}.service"' in deploy
+    assert "systemctl daemon-reload" in deploy
+    assert deploy.count('refresh_service_units "$APP_DIR"') == 2
 
 
 def test_production_workflow_bootstraps_the_versioned_deploy_helper():

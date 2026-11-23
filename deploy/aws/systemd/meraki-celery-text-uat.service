@@ -10,7 +10,7 @@ Group=meraki
 WorkingDirectory=/srv/meraki-uat/merakiai-backend
 EnvironmentFile=/etc/meraki/backend-uat.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/srv/meraki-uat/.venv/bin/python -m celery -A app.core.celery_app.celery_app worker --queues=text_tasks --concurrency=2 --loglevel=info --hostname=text-uat@%H
+ExecStart=/srv/meraki-uat/.venv/bin/python -m celery -A app.core.celery_app.celery_app worker --queues=text_tasks --concurrency=8 --loglevel=info --hostname=text-uat@%H
 Restart=always
 RestartSec=5
 TimeoutStopSec=180
