@@ -5,7 +5,12 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.auth import auth_guard, require_mfa_for_password_change, security
+from app.core.auth import (
+    _decode_access_token,
+    auth_guard,
+    require_mfa_for_password_change,
+    security,
+)
 from app.core.rate_limit import enforce_rate_limit, rate_limit
 from app.db.supabase import get_supabase, get_supabase_anon
 from app.models.models import (
@@ -22,6 +27,23 @@ router = APIRouter(prefix="/auth", tags=["Auth (Supabase)"])
 
 PUBLIC_SITE_URL = os.getenv("PUBLIC_SITE_URL", "http://localhost:3001")
 recovery_security = HTTPBearer()
+
+# amr methods a Supabase recovery-link session carries. An ordinary login token
+# carries "password" (or "oauth"/"totp") and must not be able to set a password
+# without the current one: a leaked access token would otherwise be a takeover.
+_RECOVERY_AMR_METHODS = {"recovery", "otp", "magiclink"}
+
+
+def _is_recovery_session(token: str) -> bool:
+    try:
+        claims = _decode_access_token(token)
+    except Exception:
+        return False
+    methods = {
+        (m.get("method") if isinstance(m, dict) else m)
+        for m in (claims.get("amr") or [])
+    }
+    return bool(methods & _RECOVERY_AMR_METHODS)
 
 # A university network can put hundreds of legitimate students behind one
 # public IP. Keep a broad network ceiling, then enforce tight limits on the
@@ -211,6 +233,8 @@ def reset_password(
 ):
     """Set a new password for the user in a valid Supabase session."""
     try:
+        if not _is_recovery_session(credentials.credentials):
+            raise ValueError("Token is not a password-recovery session")
         response = get_supabase_anon().auth.get_user(credentials.credentials)
         user = getattr(response, "user", None)
         user_id = getattr(user, "id", None)

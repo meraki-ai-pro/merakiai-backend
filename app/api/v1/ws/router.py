@@ -7,11 +7,12 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPAuthorizationCredentials
 
 from app.core import assignments
 from app.core.auth import _validate_token
+from app.core.enrolment import PARTICIPATING_STATUSES, require_enrolment, require_mode_enabled
 from app.core.websocket_manager import manager
 from app.core import analytics
 from app.db.supabase import get_user_client, get_async_supabase
@@ -121,6 +122,39 @@ def _db_end_mode_session(token: str, mode_session_id: str) -> dict | None:
     return ms_res.data[0]
 
 
+async def _session_course_id(session_id: str, user_id: str) -> str | None:
+    """Course of a session, only if ``user_id`` owns it (None otherwise).
+
+    REST enforces this on every turn; the socket has to as well, or a session
+    UUID alone lets anyone attach to (and evict) another student's stream.
+    """
+    supabase = await get_async_supabase()
+    res = await (
+        supabase.table("sessions")
+        .select("user_id,course_id")
+        .eq("id", session_id)
+        .execute()
+    )
+    if not res.data or res.data[0].get("user_id") != user_id:
+        return None
+    return res.data[0].get("course_id")
+
+
+def _check_course_access(
+    user_id: str, email: str, course_id: str | None, mode: str | None = None
+) -> str | None:
+    """Same enrolment / mode gates as the REST routes. Returns an error or None."""
+    if not course_id:
+        return "Session has no course assigned."
+    try:
+        require_enrolment({"id": user_id, "email": email}, course_id, PARTICIPATING_STATUSES)
+        if mode:
+            require_mode_enabled(course_id, mode)
+    except HTTPException as exc:
+        return str(exc.detail)
+    return None
+
+
 async def _session_prefers_video(session_id: str) -> bool:
     supabase = await get_async_supabase()
     res = await (
@@ -160,6 +194,16 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
+    # --- Session ownership (before we register or evict any connection) ----
+    try:
+        course_id = await _session_course_id(session_id, user_id)
+    except Exception:
+        logger.exception("WS session lookup failed  session=%s", session_id)
+        course_id = None
+    if course_id is None:
+        await websocket.close(code=4003, reason="Forbidden")
+        return
+
     # --- Open connection, Redis listener, and WS session analytics --------
     await manager.connect(session_id, websocket)
     ws_session_id = await asyncio.to_thread(
@@ -188,6 +232,16 @@ async def websocket_endpoint(
 
             # A required activity from the lecturer locks every session but its own.
             if msg_type in ("rag_turn", "mode_session_start", "mode_session_turn"):
+                # Re-checked every message, as REST does: a withdrawn student
+                # must not keep working on a socket opened before withdrawal.
+                access_error = await asyncio.to_thread(
+                    _check_course_access, user_id, user.email, course_id,
+                    (data.get("mode") or "").lower().strip()
+                    if msg_type == "mode_session_start" else None,
+                )
+                if access_error:
+                    await websocket.send_json({"error": access_error})
+                    continue
                 locked = await asyncio.to_thread(assignments.lock_message_for_session, user_id, session_id)
                 if locked:
                     await websocket.send_json({"error": locked, "locked": True})

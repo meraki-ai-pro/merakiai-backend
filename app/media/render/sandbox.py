@@ -54,6 +54,27 @@ FORBIDDEN_NAMES = frozenset({
     "breakpoint", "memoryview", "help", "exit", "quit",
 })
 
+# File and object-loading primitives reachable through allowed imports. numpy
+# is allowlisted for maths, but np.load(allow_pickle=True) falls back to
+# unpickling arbitrary bytes (a write via tofile + a load = code execution),
+# and the loaders/savers/ImageMobject-style mobjects read or write any path the
+# render user can reach. A scene has no use for any of them, so they are banned
+# as names, attributes and import targets alike.
+FILE_PRIMITIVES = frozenset({
+    "load", "loads", "loadtxt", "genfromtxt", "fromfile", "fromregex", "tofile",
+    "save", "savez", "savez_compressed", "savetxt", "memmap", "DataSource",
+    "ctypeslib", "testing", "f2py", "distutils",
+    "ImageMobject", "ImageMobjectFromCamera", "SVGMobject", "VideoMobject",
+    "Code", "TexTemplate", "TexTemplateLibrary",
+})
+FORBIDDEN_NAMES = FORBIDDEN_NAMES | FILE_PRIMITIVES
+
+# TeX primitives that read or write files (MathTex(r"\input{...}")).
+FORBIDDEN_TEX = (
+    r"\input", r"\include", r"\openin", r"\openout", r"\read",
+    r"\write", r"\immediate", r"\catcode", r"\usepackage",
+)
+
 # Attribute access that leads out of the sandbox by walking the object graph:
 # ``().__class__.__bases__[0].__subclasses__()`` is the classic route to
 # arbitrary imports without ever writing the word "import".
@@ -62,7 +83,7 @@ FORBIDDEN_ATTRIBUTES = frozenset({
     "__code__", "__closure__", "__func__", "__self__", "__dict__",
     "__builtins__", "__loader__", "__spec__", "__reduce__", "__reduce_ex__",
     "__getattribute__", "__base__", "__init_subclass__", "__subclasshook__",
-})
+}) | FILE_PRIMITIVES
 
 # Hard ceiling. Legitimate scenes are well under this; a much larger file is
 # either an attempt to bury something or a model that has lost the plot.
@@ -95,6 +116,11 @@ class _Auditor(ast.NodeVisitor):
         # reach our own package tree.
         if node.level:
             raise UnsafeSceneError(f"Relative imports are not allowed ({_describe(node)}).")
+        for alias in node.names:
+            if alias.name in FILE_PRIMITIVES:
+                raise UnsafeSceneError(
+                    f"Importing {alias.name!r} is not allowed ({_describe(node)})."
+                )
         root = (node.module or "").split(".")[0]
         if root not in ALLOWED_IMPORTS:
             raise UnsafeSceneError(
@@ -153,6 +179,10 @@ def validate_scene(source: str) -> str:
         raise UnsafeSceneError(
             f"Scene code is {len(source)} characters, over the {MAX_SOURCE_CHARS} limit."
         )
+
+    for needle in FORBIDDEN_TEX:
+        if needle in source:
+            raise UnsafeSceneError(f"TeX primitive {needle!r} is not allowed.")
 
     try:
         tree = ast.parse(source)

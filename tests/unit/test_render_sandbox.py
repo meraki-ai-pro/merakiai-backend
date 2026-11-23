@@ -223,3 +223,27 @@ class TestNoBypassViaFormatting:
         )
         with pytest.raises(UnsafeSceneError):
             validate_scene(src)
+
+
+# F-01: allowed imports must not give file/pickle primitives to a scene.
+@pytest.mark.parametrize("body", [
+    'np.load("p.bin", allow_pickle=True)',
+    'np.array([1], dtype=np.uint8).tofile("p.bin")',
+    'np.fromfile("p.bin")',
+    'np.loadtxt("/etc/passwd")',
+    'np.savetxt("x", [1])',
+    'ImageMobject("/etc/passwd")',
+    'SVGMobject("/etc/passwd")',
+    r'MathTex(r"\input{/etc/passwd}")',
+    r'MathTex(r"\openin1=/etc/passwd")',
+])
+def test_file_primitives_are_rejected(body):
+    src = f"from manim import *\nimport numpy as np\n\nclass S(Scene):\n    def construct(self):\n        {body}\n"
+    with pytest.raises(UnsafeSceneError):
+        validate_scene(src)
+
+
+def test_from_numpy_import_load_is_rejected():
+    src = "from numpy import load\nfrom manim import *\n\nclass S(Scene):\n    def construct(self):\n        pass\n"
+    with pytest.raises(UnsafeSceneError):
+        validate_scene(src)
