@@ -68,7 +68,7 @@ def _assert_assignable_owner(sb, owner_id: str | None) -> None:
     if row[0]["role"] not in LECTURER_ROLES:
         raise HTTPException(
             status_code=400,
-            detail="Course owner must have the lecturer role (or be an admin)",
+            detail="Course owner must have the instructor role (or be an admin)",
         )
 
 

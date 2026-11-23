@@ -74,9 +74,6 @@ class WebSocketManager:
             logger.warning("WS send failed  session=%s  error=%s", session_id, exc)
             await self.disconnect(session_id)
 
-    @property
-    def active_count(self) -> int:
-        return len(self._connections)
 
     # ------------------------------------------------------------------
     # Internal shared Redis Pub/Sub listener

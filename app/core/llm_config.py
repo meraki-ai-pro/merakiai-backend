@@ -13,7 +13,13 @@ _lock = threading.Lock()
 # Invalidated on every write; safe because all writes go through _lock.
 _overrides_cache: Optional[Dict[str, Any]] = None
 
-VALID_MODES = {"learn", "application", "review", "review_generation"}
+VALID_MODES = {
+    "learn",
+    "application",
+    "review",
+    "review_generation",
+    "session_title",
+}
 
 DEFAULTS: Dict[str, Dict[str, Any]] = {
     "learn": {
@@ -48,6 +54,36 @@ DEFAULTS: Dict[str, Dict[str, Any]] = {
         "model": "claude-opus-4-6",
         "temperature": 0.2,
         "max_tokens": 8000,
+    },
+    # Turning a lecturer's uploaded exam paper into structured questions. A
+    # 40-question paper with options and answer keys is several thousand
+    # tokens of JSON, and a truncated array loses the tail of the paper.
+    "exam_import": {
+        "model": "claude-sonnet-4-6",
+        "temperature": 0.0,
+        "max_tokens": 16000,
+    },
+    # Suggesting a mark for one short answer. Deterministic, because the same
+    # answer must not earn different marks for two students; a lecturer
+    # confirms every suggestion before results are released.
+    "exam_marking": {
+        "model": "claude-sonnet-4-6",
+        "temperature": 0.0,
+        "max_tokens": 400,
+    },
+    # Sidebar session titles: a few words, so the smallest, fastest model.
+    "session_title": {
+        "model": "claude-haiku-4-5-20251001",
+        "temperature": 0.0,
+        "max_tokens": 24,
+    },
+    # Intervention Studio: suggested responses and targeted practice papers.
+    # Room for 15 questions of JSON with options; a little temperature so a
+    # second draft is not the first one again.
+    "intervention": {
+        "model": "claude-sonnet-4-6",
+        "temperature": 0.3,
+        "max_tokens": 6000,
     },
 }
 

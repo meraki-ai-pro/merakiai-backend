@@ -5,7 +5,7 @@ def test_standard_anthropic_key_does_not_add_workspace_header(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
 
-    assert client_options() == {"api_key": "sk-ant-test"}
+    assert client_options() == {"api_key": "sk-ant-test", "max_retries": 0}
 
 
 def test_identity_linked_key_adds_workspace_header(monkeypatch):
@@ -14,6 +14,7 @@ def test_identity_linked_key_adds_workspace_header(monkeypatch):
 
     assert client_options() == {
         "api_key": "sk-ant-test",
+        "max_retries": 0,
         "default_headers": {"anthropic-workspace-id": "wrkspc_test"},
     }
 

@@ -7,7 +7,13 @@ import random
 from typing import Any, Callable, Dict, List, Optional
 
 from anthropic import Anthropic, AsyncAnthropic
-from anthropic._exceptions import OverloadedError, APIError, RateLimitError, APITimeoutError
+from anthropic._exceptions import (
+    OverloadedError,
+    APIError,
+    APIStatusError,
+    RateLimitError,
+    APITimeoutError,
+)
 
 from app.ai.anthropic_config import client_options
 from app.core.llm_config import get_mode_config  # noqa: F401 — re-exported for callers
@@ -92,7 +98,12 @@ async def _call_anthropic(
             kwargs["system"] = system_parts
         if "output_config" in config:
             kwargs["output_config"] = config["output_config"]
-        resp = get_client().messages.create(**kwargs)
+        default_timeout = float(os.getenv("ANTHROPIC_TIMEOUT_SECONDS", "90"))
+        if mode in {"review", "review_generation"}:
+            timeout = float(os.getenv("ANTHROPIC_REVIEW_TIMEOUT_SECONDS", "20"))
+        else:
+            timeout = default_timeout
+        resp = get_client().messages.create(**kwargs, timeout=timeout)
         return resp.content[0].text
 
     return await asyncio.to_thread(_blocking)
@@ -109,7 +120,10 @@ async def generate_response(
     Pass ``system_parts`` to use a separate system prompt (enables prompt
     caching via ``cache_control`` on stable prefixes).
     """
-    max_attempts = int(os.getenv("ANTHROPIC_MAX_RETRIES", "4"))
+    if mode in {"review", "review_generation"}:
+        max_attempts = int(os.getenv("ANTHROPIC_REVIEW_MAX_RETRIES", "2"))
+    else:
+        max_attempts = int(os.getenv("ANTHROPIC_MAX_RETRIES", "3"))
     base_delay = float(os.getenv("ANTHROPIC_RETRY_BASE_DELAY", "0.8"))  # seconds
 
     last_err: Exception | None = None
@@ -119,7 +133,7 @@ async def generate_response(
             return await _call_anthropic(
                 prompt, mode, system_parts=system_parts, images=images
             )
-        except (OverloadedError, RateLimitError, APITimeoutError, APIError) as e:
+        except (OverloadedError, RateLimitError, APITimeoutError) as e:
             last_err = e
 
             sleep_s = base_delay * (2 ** (attempt - 1))
@@ -129,6 +143,24 @@ async def generate_response(
                 raise
 
             await asyncio.sleep(sleep_s)
+        except APIStatusError as e:
+            # Retry provider-side 5xx responses, but fail fast for bad keys,
+            # invalid requests and exhausted credit. Those cannot heal during
+            # this request and previously kept the student waiting for minutes.
+            if e.status_code < 500:
+                raise
+            last_err = e
+            sleep_s = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
+            if attempt == max_attempts:
+                raise
+            await asyncio.sleep(sleep_s)
+        except APIError:
+            # Connection errors are retryable; status errors were handled above.
+            if attempt == max_attempts:
+                raise
+            await asyncio.sleep(
+                base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.25)
+            )
 
     raise last_err or RuntimeError("Anthropic call failed")
 

@@ -298,44 +298,6 @@ def submit_ice_candidate(
     logger.debug("ICE candidate submitted  agent=%s  stream=%s", agent_id, stream_id)
 
 
-def speak(
-    agent_id: str,
-    stream_id: str,
-    *,
-    audio_url: str,
-    did_session_id: str,
-) -> None:
-    """
-    POST /agents/{agentId}/streams/{streamId}
-
-    Sends pre-generated ElevenLabs audio to the avatar.
-    The avatar renders the audio in real-time via the WebRTC connection — no
-    video file is generated and no polling is required.
-    """
-    payload: Dict[str, Any] = {
-        "script": {
-            "type": "audio",
-            "audio_url": audio_url,
-        },
-        "session_id": did_session_id,
-    }
-    r = requests.post(
-        f"{DID_BASE_URL}/agents/{agent_id}/streams/{stream_id}",
-        json=payload,
-        headers=_headers(),
-        timeout=30,
-    )
-    if r.status_code >= 400:
-        raise DidAgentError(
-            f"D-ID speak [{r.status_code}]: "
-            f"{_safe_response(r)}"
-        )
-    logger.info(
-        "D-ID speak dispatched  agent=%s  stream=%s  audio_url_set=%s",
-        agent_id, stream_id, bool(audio_url),
-    )
-
-
 def close_stream(agent_id: str, stream_id: str, did_session_id: str) -> None:
     """
     DELETE /agents/{agentId}/streams/{streamId}

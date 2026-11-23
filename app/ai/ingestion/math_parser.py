@@ -40,7 +40,6 @@ PARAGRAPH = "paragraph"
 EQUATION = "equation"
 LIST_ITEM = "list_item"
 TABLE = "table"
-FIGURE = "figure"
 
 Block = Dict[str, Any]
 
@@ -1013,6 +1012,3 @@ def parse_blocks(content: bytes, filename: str) -> List[Block]:
     return blocks
 
 
-def blocks_needing_math_ocr(blocks: List[Block]) -> List[Block]:
-    """PDF blocks that look mathematical but whose maths did not survive extraction."""
-    return [b for b in blocks if b.get("needs_math_ocr")]

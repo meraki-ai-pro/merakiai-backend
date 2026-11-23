@@ -37,6 +37,8 @@ ENROLMENT_CREATED: Final = "enrolment.created"
 ENROLMENT_CHANGED: Final = "enrolment.changed"
 ASSESSMENT_SUBMITTED: Final = "assessment.submitted"
 MASTERY_UPDATED: Final = "mastery.updated"
+# The Review grader named the wrong belief behind an answer (payload.label).
+MISCONCEPTION_DETECTED: Final = "misconception.detected"
 
 # Client-emitted: only the browser knows these happened.
 CITATION_CLICKED: Final = "citation.clicked"
@@ -50,6 +52,7 @@ SERVER_EVENTS: Final = frozenset({
     SESSION_STARTED, TURN_COMPLETED, CHUNKS_RETRIEVED, RETRIEVAL_EMPTY,
     RETRIEVAL_WEAK, QUERY_REWRITTEN,
     ENROLMENT_CREATED, ENROLMENT_CHANGED, ASSESSMENT_SUBMITTED, MASTERY_UPDATED,
+    MISCONCEPTION_DETECTED,
 })
 
 # The only names POST /events will accept. A client cannot forge a

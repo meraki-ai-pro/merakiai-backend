@@ -29,6 +29,8 @@ _EXT_MAP = {
 COURSE_DOCS_BUCKET = "course-documents"
 STUDENT_UPLOADS_BUCKET = "student-uploads"
 RENDERED_MEDIA_BUCKET = "rendered-media"
+# Lecture videos (sql/023). The browser uploads straight in with a signed upload URL.
+COURSE_VIDEOS_BUCKET = "course-videos"
 
 # Long enough for a lecturer to open a file from the dashboard, short enough
 # that a leaked URL in a browser history or proxy log expires quickly.

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, EmailStr, Field
 
+from app.core import audit
 from app.core.auth import admin_guard, require_mfa_if_enrolled
 from app.db.supabase import get_supabase
 
@@ -14,6 +16,9 @@ from app.db.supabase import get_supabase
 _POSTGREST_METACHAR_RE = re.compile(r"[,.()\[\]{}]")
 
 router = APIRouter(prefix="/users", tags=["Admin – Users"])
+
+# Supabase Auth has no "ban forever"; a century is the conventional stand-in.
+_BAN_FOREVER = "876000h"
 
 # Ordering is for display and coarse comparison only. 'lecturer' is not
 # "more than a student" in an authority sense — it is a different capability
@@ -36,34 +41,72 @@ class RoleUpdatePayload(BaseModel):
     role: str
 
 
+class UserCreatePayload(BaseModel):
+    email: EmailStr
+    # Set by the super admin and shared with the person, who can change it from
+    # their account page. An invite email would depend on Supabase SMTP, which
+    # this deployment does not rely on for anything else.
+    password: str = Field(..., min_length=8, max_length=128)
+    role: str = "user"
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    university_name: str = Field("", max_length=200)
+    region: str = Field("", max_length=100)
+    country: str = Field("", max_length=100)
+
+
+class UserUpdatePayload(BaseModel):
+    """Every field optional: only what is sent changes."""
+    email: EmailStr | None = None
+    password: str | None = Field(None, min_length=8, max_length=128)
+    first_name: str | None = Field(None, min_length=1, max_length=100)
+    last_name: str | None = Field(None, min_length=1, max_length=100)
+    university_name: str | None = Field(None, max_length=200)
+    region: str | None = Field(None, max_length=100)
+    country: str | None = Field(None, max_length=100)
+
+
+def _require_super_admin(user: dict, action: str) -> None:
+    if user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail=f"Only super admins can {action}")
+
+
 @router.get("")
 def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     role: str | None = None,
     search: str | None = None,
+    include_deleted: bool = False,
     _user=Depends(admin_guard),
 ):
     sb = get_supabase()
     offset = (page - 1) * page_size
 
-    q = sb.table("users").select(
-        "id, email, role, first_name, last_name, university_name, country, created_at",
-        count="exact",
-    )
-    if role:
-        q = q.eq("role", role)
-    if search:
-        # H-5: strip PostgREST metacharacters and cap length before interpolating
-        # into the filter string to prevent filter-tree injection.
-        safe_search = _POSTGREST_METACHAR_RE.sub("", search)[:100]
-        q = q.or_(
-            f"email.ilike.%{safe_search}%,"
-            f"first_name.ilike.%{safe_search}%,"
-            f"last_name.ilike.%{safe_search}%"
-        )
+    def _query(columns: str, filter_deleted: bool):
+        q = sb.table("users").select(columns, count="exact")
+        if role:
+            q = q.eq("role", role)
+        if filter_deleted:
+            q = q.is_("deleted_at", "null")
+        if search:
+            # H-5: strip PostgREST metacharacters and cap length before interpolating
+            # into the filter string to prevent filter-tree injection.
+            safe_search = _POSTGREST_METACHAR_RE.sub("", search)[:100]
+            q = q.or_(
+                f"email.ilike.%{safe_search}%,"
+                f"first_name.ilike.%{safe_search}%,"
+                f"last_name.ilike.%{safe_search}%"
+            )
+        return q.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
 
-    res = q.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+    columns = "id, email, role, first_name, last_name, university_name, region, country, created_at"
+    try:
+        res = _query(columns + ", deleted_at", filter_deleted=not include_deleted)
+    except Exception:
+        # sql/016 not applied: nobody can have been soft-deleted yet.
+        res = _query(columns, filter_deleted=False)
+
     return {
         "users": res.data or [],
         "total": res.count or 0,
@@ -147,18 +190,177 @@ def update_user_role(
     return {"status": "ok", "user_id": user_id, "new_role": new_role}
 
 
-@router.delete("/{user_id}")
-def delete_user(
-    user_id: str,
+@router.post("")
+def create_user(
+    payload: UserCreatePayload,
+    request: Request,
     user=Depends(admin_guard),
     _mfa=Depends(require_mfa_if_enrolled),
 ):
+    """Create a student, lecturer or admin account, ready to sign in."""
+    _require_super_admin(user, "create accounts")
+    if payload.role not in _ROLE_HIERARCHY:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {payload.role!r}")
+
+    sb = get_supabase()
+    profile = {
+        "first_name": payload.first_name.strip(),
+        "last_name": payload.last_name.strip(),
+        "university_name": payload.university_name.strip(),
+        "region": payload.region.strip(),
+        "country": payload.country.strip(),
+    }
+    try:
+        created = sb.auth.admin.create_user({
+            "email": payload.email,
+            "password": payload.password,
+            # The super admin vouches for the address; no confirmation email.
+            "email_confirm": True,
+            "user_metadata": {"first_name": profile["first_name"], "last_name": profile["last_name"]},
+        }).user
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc).lower()
+        if "already" in message or "registered" in message or "exists" in message:
+            raise HTTPException(status_code=409, detail="An account with this email already exists")
+        raise HTTPException(status_code=400, detail="Could not create the account") from exc
+
+    row = {**profile, "email": payload.email, "role": payload.role}
+    # The auth trigger normally creates the profile row; fill it in. Without
+    # the trigger, insert it — users requires an active avatar, which signup
+    # otherwise assigns on first sign-in.
+    if not sb.table("users").update(row).eq("id", created.id).execute().data:
+        bundles = sb.table("avatar_voice_bundles").select("avatar_id, is_active").execute().data or []
+        avatar = next((b["avatar_id"] for b in bundles if b.get("is_active")), None)
+        sb.table("users").insert({**row, "id": created.id, "avatar_id": avatar}).execute()
+
+    # Same as signup: a class list imported before this account existed has
+    # invitations waiting on the address.
+    try:
+        sb.rpc("accept_enrolment_invitations", {"p_user_id": created.id, "p_email": payload.email}).execute()
+    except Exception:  # noqa: BLE001 — sql/013 may not be applied
+        pass
+
+    audit.record(
+        actor=user, action="user.create", resource_type="user", resource_id=created.id,
+        new_values={"email": payload.email, "role": payload.role}, request=request,
+    )
+    return {"status": "ok", "user_id": created.id, "email": payload.email, "role": payload.role}
+
+
+@router.patch("/{user_id}")
+def update_user(
+    user_id: str,
+    payload: UserUpdatePayload,
+    request: Request,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
+    """Edit an account's details, email or password. Role has its own endpoint."""
+    _require_super_admin(user, "edit accounts")
+    sb = get_supabase()
+    target = _load_target(sb, user_id)
+
+    changes = payload.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+
+    auth_changes = {k: changes.pop(k) for k in ("email", "password") if k in changes}
+    if auth_changes:
+        try:
+            sb.auth.admin.update_user_by_id(user_id, auth_changes)
+        except Exception as exc:  # noqa: BLE001
+            if "email" in auth_changes and "already" in str(exc).lower():
+                raise HTTPException(status_code=409, detail="That email is already in use") from exc
+            raise HTTPException(status_code=400, detail="Could not update sign-in details") from exc
+    if "email" in auth_changes:
+        changes["email"] = auth_changes["email"]
+    if changes:
+        sb.table("users").update(changes).eq("id", user_id).execute()
+
+    audit.record(
+        actor=user, action="user.update", resource_type="user", resource_id=user_id,
+        old_values={"email": target.get("email")},
+        # Never the password itself — only that it was reset.
+        new_values={**changes, **({"password": "reset"} if "password" in auth_changes else {})},
+        request=request,
+    )
+    return {"status": "ok", "user_id": user_id}
+
+
+def _load_target(sb, user_id: str) -> dict:
+    rows = sb.table("users").select("id, role, email, deleted_at").eq("id", user_id).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="User not found")
+    return rows[0]
+
+
+@router.delete("/{user_id}")
+def soft_delete_user(
+    user_id: str,
+    request: Request,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
+    """Remove an account without destroying it.
+
+    The profile, sessions, attempts and feedback all stay, so research data and
+    audit history survive and the account can be restored. What stops the
+    person is the auth ban: Supabase refuses their sign-in and token refresh,
+    so an access token already issued lapses within the hour.
+
+    This replaced a hard delete of the auth user, which cascaded through
+    public.users and took everything the account had ever produced with it.
+    """
     if user["role"] != "super_admin":
         raise HTTPException(status_code=403, detail="Only super admins can delete users")
     if user_id == user["id"]:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
     sb = get_supabase()
-    # Deleting from auth.users cascades to public.users via FK
-    sb.auth.admin.delete_user(user_id)
-    return {"status": "ok", "deleted_user_id": user_id}
+    target = _load_target(sb, user_id)
+    if target["role"] == "super_admin":
+        # Otherwise two super admins can lock each other out; demote first.
+        raise HTTPException(
+            status_code=400, detail="Demote a super admin before deleting their account"
+        )
+    if target.get("deleted_at"):
+        return {"status": "ok", "user_id": user_id, "deleted_at": target["deleted_at"]}
+
+    # Ban first: if it fails, nothing has changed and the admin can retry.
+    # The reverse order would show "deleted" for someone who can still sign in.
+    sb.auth.admin.update_user_by_id(user_id, {"ban_duration": _BAN_FOREVER})
+
+    deleted_at = datetime.now(timezone.utc).isoformat()
+    sb.table("users").update({"deleted_at": deleted_at, "deleted_by": user["id"]}).eq(
+        "id", user_id
+    ).execute()
+
+    audit.record(
+        actor=user, action="user.soft_delete", resource_type="user", resource_id=user_id,
+        old_values={"email": target.get("email"), "role": target.get("role")},
+        request=request,
+    )
+    return {"status": "ok", "user_id": user_id, "deleted_at": deleted_at}
+
+
+@router.post("/{user_id}/restore")
+def restore_user(
+    user_id: str,
+    request: Request,
+    user=Depends(admin_guard),
+    _mfa=Depends(require_mfa_if_enrolled),
+):
+    if user["role"] != "super_admin":
+        raise HTTPException(status_code=403, detail="Only super admins can restore users")
+
+    sb = get_supabase()
+    _load_target(sb, user_id)
+
+    sb.auth.admin.update_user_by_id(user_id, {"ban_duration": "none"})
+    sb.table("users").update({"deleted_at": None, "deleted_by": None}).eq("id", user_id).execute()
+
+    audit.record(
+        actor=user, action="user.restore", resource_type="user", resource_id=user_id,
+        request=request,
+    )
+    return {"status": "ok", "user_id": user_id}

@@ -155,7 +155,8 @@ class TestAssessmentIntegrity:
         import app.api.v1.assessments as mod
 
         src = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "item.answer.strip().lower() ==" in src
+        submit = src[src.index("async def submit("): src.index("def my_result(")]
+        assert "grade_objective(" in submit
 
     def test_retakes_are_refused(self):
         """A retake breaks the pre/post pairing the whole study rests on."""
@@ -163,7 +164,8 @@ class TestAssessmentIntegrity:
         import app.api.v1.assessments as mod
 
         src = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "already completed this assessment" in src
+        prepare = src[src.index("def _prepare_submission("): src.index("async def submit(")]
+        assert "status_code=409" in prepare and "already submitted" in prepare
 
     def test_no_per_question_feedback_is_returned(self):
         """Telling a student which pre-test items were wrong hands back the

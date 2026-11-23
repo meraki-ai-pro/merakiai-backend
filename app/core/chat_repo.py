@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-from uuid import UUID
 from app.db.supabase import get_async_supabase
 
 logger = logging.getLogger(__name__)
@@ -41,45 +40,6 @@ async def get_course_info(course_id: str) -> Dict[str, Any]:
     if not res.data:
         raise ValueError(f"Course {course_id!r} not found")
     return res.data[0]
-
-
-async def ensure_session(
-    session_id: str, user_id: str, current_mode: str = "learn"
-) -> None:
-    """
-    Ensure session exists in DB. If it doesn't exist, create it.
-    ✅ FIX: Don't set prefers_video here - it will be set via /sessions/video endpoint
-    """
-    try:
-        UUID(str(session_id))
-    except (ValueError, TypeError):
-        raise ValueError("Invalid session_id format. Expected UUID.")
-
-    supabase = await get_async_supabase()
-    res = (
-        await supabase.table("sessions")
-        .select("id,user_id")
-        .eq("id", session_id)
-        .execute()
-    )
-
-    if not res.data:
-        # ✅ FIX: Removed prefers_video - let it use database default or be set separately
-        await supabase.table("sessions").insert(
-            {
-                "id": session_id,
-                "user_id": user_id,
-                "current_mode": current_mode,
-                # Removed: "prefers_video": False  # This was forcing it to False!
-            }
-        ).execute()
-        return
-
-    # Ownership check
-    row = res.data[0]
-    # ✅ FIXED: Changed user["id"] to user_id (the parameter name)
-    if row.get("user_id") and row["user_id"] != user_id:
-        raise PermissionError("Session does not belong to user")
 
 
 async def get_session_prefers_video(session_id: str) -> bool:

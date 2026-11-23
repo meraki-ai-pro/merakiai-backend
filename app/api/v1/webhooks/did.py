@@ -95,7 +95,7 @@ async def did_webhook(session_id: str, request: Request):
             "type": "video_ready",
             "response_format": "video",
             "video_url": video_url,
-            "subtitle_url": subtitle_url,
+            "subtitles_url": subtitle_url,
             "source": "did",
         })
 

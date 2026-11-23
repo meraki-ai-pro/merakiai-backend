@@ -61,6 +61,9 @@ export const FPS = 30;
  */
 export const STEP_SECONDS = 4.5;
 export const CHART_SECONDS = 8;
+/** Title card and closing hold. Mirrors TITLE_SECONDS / TAIL_SECONDS in remotion_spec.py. */
+export const TITLE_SECONDS = 3;
+export const TAIL_SECONDS = 2.5;
 
 /** Fallback used when Remotion Studio is opened without --props. */
 export const DEFAULT_SPEC: LessonSpec = {

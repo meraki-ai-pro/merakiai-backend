@@ -506,11 +506,3 @@ def omml_to_latex(element) -> str:
         return ""
 
 
-def iter_omml(parent) -> List:
-    """Return every ``m:oMath`` element beneath ``parent`` in document order."""
-    return parent.findall(f".//{_m('oMath')}")
-
-
-def paragraph_has_math(paragraph) -> bool:
-    """True when a ``python-docx`` paragraph contains at least one equation."""
-    return bool(iter_omml(paragraph._p))

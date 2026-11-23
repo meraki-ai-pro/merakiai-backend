@@ -45,16 +45,25 @@ class SignUpPayload(BaseModel):
     university_name: str = Field(..., max_length=200)
     region: str = Field(..., max_length=100)
     country: str = Field(..., max_length=100)
+    # Cloudflare Turnstile token. Supabase Auth verifies it when captcha protection
+    # is enabled in the dashboard; the backend only forwards it.
+    captcha_token: str | None = Field(None, max_length=4096)
 
 
 class LoginPayload(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=1, max_length=128)
+    # Cloudflare Turnstile token. Supabase Auth verifies it when captcha protection
+    # is enabled in the dashboard; the backend only forwards it.
+    captcha_token: str | None = Field(None, max_length=4096)
 
 
 class ForgotPasswordPayload(BaseModel):
     email: EmailStr
     redirect_to: AnyHttpUrl | None = None  # must be a valid URL; origin checked against ALLOWED_ORIGINS in route
+    # Cloudflare Turnstile token. Supabase Auth verifies it when captcha protection
+    # is enabled in the dashboard; the backend only forwards it.
+    captcha_token: str | None = Field(None, max_length=4096)
 
 
 class ResetPasswordPayload(BaseModel):
@@ -65,18 +74,20 @@ class AvatarSelectRequest(BaseModel):
     avatar_id: str = Field(..., max_length=100)
 
 
-class TextTurnRequest(BaseModel):
-    session_id: str = Field(..., max_length=100)
-    message: str = Field(..., min_length=1, max_length=10_000)
-    response_format: str | None = Field(None, max_length=50)
-
-
 class SessionModeUpdate(BaseModel):
     current_mode: str = Field(..., max_length=50)  # learn|application|review
 
 
 class SessionTitleUpdate(BaseModel):
     title: str = Field(..., min_length=1, max_length=120)
+
+
+class SessionPinUpdate(BaseModel):
+    pinned: bool
+
+
+class SessionArchiveUpdate(BaseModel):
+    archived: bool
 
 
 class UpdatePasswordPayload(BaseModel):
@@ -86,6 +97,9 @@ class UpdatePasswordPayload(BaseModel):
     # is what makes the token alone insufficient.
     current_password: str = Field(..., min_length=1, max_length=128)
     new_password: str = Field(..., min_length=8, max_length=128)
+    # Cloudflare Turnstile token. Supabase Auth verifies it when captcha protection
+    # is enabled in the dashboard; the backend only forwards it.
+    captcha_token: str | None = Field(None, max_length=4096)
 
 
 class UpdateProfilePayload(BaseModel):

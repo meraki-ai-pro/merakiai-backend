@@ -18,6 +18,12 @@ import pytest
 from app.ai.rag.modes_sessions import service
 
 
+@pytest.fixture(autouse=True)
+def _no_topic_lookup(monkeypatch):
+    """Generation reads the course's topic list; these tests are about variety."""
+    monkeypatch.setattr(service.mastery, "course_topics", lambda course_id: [])
+
+
 ITEM = {
     "type": "mcq",
     "question_id": "REV-MCQ-XXXX",
@@ -25,6 +31,7 @@ ITEM = {
     "category": "Related Rates",
     "question": "A balloon is inflated at 2 cm/s. How fast is the volume growing?",
     "options": {"A": "100pi", "B": "200pi", "C": "400pi", "D": "500pi"},
+    "correct": "C",
 }
 
 

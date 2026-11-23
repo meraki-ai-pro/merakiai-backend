@@ -31,6 +31,19 @@ _LOGIN_ACCOUNT_CALLS_PER_MINUTE = 5
 _REFRESH_TOKEN_CALLS_PER_MINUTE = 10
 
 
+def _raise_if_captcha(exc: Exception) -> None:
+    """Report a failed captcha as itself.
+
+    Supabase rejects a missing, expired or reused Turnstile token before it
+    looks at the password, so without this the user would be told their
+    password was wrong when it was the captcha.
+    """
+    if "captcha" in str(exc).lower():
+        raise HTTPException(
+            status_code=400, detail="The captcha check failed. Please complete it again."
+        ) from exc
+
+
 def _validate_redirect_url(redirect_to: str | None, fallback: str) -> str:
     """Allow redirect_to only if its origin is in ALLOWED_ORIGINS.
 
@@ -62,6 +75,7 @@ def signup(payload: SignUpPayload, _rl=Depends(rate_limit(max_calls=5, window_se
             "email": payload.email,
             "password": payload.password,
             "options": {
+                "captcha_token": payload.captcha_token,
                 "data": {
                     "first_name": payload.first_name,
                     "last_name": payload.last_name,
@@ -73,6 +87,7 @@ def signup(payload: SignUpPayload, _rl=Depends(rate_limit(max_calls=5, window_se
         })
     except Exception as e:
         logger.error("Signup error: %s", e)
+        _raise_if_captcha(e)
         raise HTTPException(status_code=400, detail="Registration failed. Please try again.")
 
     session = getattr(res, "session", None)
@@ -146,9 +161,11 @@ def login(
         res = get_supabase_anon().auth.sign_in_with_password({
             "email": payload.email,
             "password": payload.password,
+            "options": {"captcha_token": payload.captcha_token},
         })
     except Exception as e:
         logger.warning("Login failed for email=%s: %s", payload.email, e)
+        _raise_if_captcha(e)
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     try:
@@ -176,9 +193,12 @@ def forgot_password(payload: ForgotPasswordPayload, _rl=Depends(rate_limit(max_c
         fallback=f"{PUBLIC_SITE_URL}/auth/reset-password",
     )
     try:
-        get_supabase_anon().auth.reset_password_for_email(payload.email, {"redirect_to": redirect_to})
+        get_supabase_anon().auth.reset_password_for_email(
+            payload.email, {"redirect_to": redirect_to, "captcha_token": payload.captcha_token}
+        )
     except Exception as e:
         logger.error("Forgot-password error for email=%s: %s", payload.email, e)
+        _raise_if_captcha(e)
         raise HTTPException(status_code=400, detail="If that email is registered, a reset link has been sent.")
     return {"status": "ok", "message": "If that email is registered, a reset link has been sent."}
 
@@ -360,8 +380,12 @@ def update_password(
         reauthenticated = get_supabase_anon().auth.sign_in_with_password({
             "email": email,
             "password": payload.current_password,
+            # A password sign-in, so Supabase demands a captcha here too once
+            # protection is on.
+            "options": {"captcha_token": payload.captcha_token},
         })
-    except Exception:  # noqa: BLE001 — any failure here means "wrong password"
+    except Exception as e:  # noqa: BLE001 — otherwise any failure means "wrong password"
+        _raise_if_captcha(e)
         raise HTTPException(status_code=401, detail="Your current password is incorrect.")
 
     try:

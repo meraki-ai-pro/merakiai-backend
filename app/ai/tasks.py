@@ -18,10 +18,11 @@ from app.core.chat_repo import (
     get_course_info,
 )
 from app.ai.rag.service import query_rag
+from app.ai.session_titles import title_session
 from app.media.video_service import maybe_generate_video
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET, upload_student_image
 from app.db.supabase import get_supabase, reset_async_supabase
-from app.core import analytics, events
+from app.core import analytics, events, mastery
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +180,46 @@ async def _retain_attachments(
     return stored or None
 
 
+def _known_misconceptions(course_id: str, topic: str | None) -> list[str]:
+    """Misconception labels already recorded for this topic, most recent first.
+
+    Shown to the grader so it reuses a label rather than paraphrasing it; the
+    radar can only count what is spelled the same.
+    """
+    try:
+        query = (
+            get_supabase().table("events").select("payload")
+            .eq("course_id", course_id).eq("event_type", events.MISCONCEPTION_DETECTED)
+        )
+        query = query.eq("topic", topic) if topic else query.is_("topic", "null")
+        rows = query.order("created_at", desc=True).limit(200).execute().data or []
+    except Exception as exc:  # noqa: BLE001 — the grader just names it fresh
+        logger.warning("Known misconceptions unavailable: %s", exc)
+        return []
+    seen: dict[str, str] = {}
+    for row in rows:
+        label = ((row.get("payload") or {}).get("label") or "").strip()
+        if label:
+            seen.setdefault(label.casefold(), label)
+    return list(seen.values())[:40]
+
+
+def _previous_help_level(session_id: str, user_id: str) -> int | None:
+    """The help-ladder rung of this session's last answer, if it had one."""
+    try:
+        rows = (
+            get_supabase().table("events").select("payload")
+            .eq("user_id", user_id).eq("session_id", session_id)
+            .eq("event_type", events.TURN_COMPLETED)
+            .order("created_at", desc=True).limit(1).execute().data
+        )
+    except Exception as exc:  # noqa: BLE001 — the ladder just restarts
+        logger.warning("Help-ladder state unavailable: %s", exc)
+        return None
+    level = (rows[0].get("payload") or {}).get("help_level") if rows else None
+    return level if isinstance(level, int) and 0 <= level <= 5 else None
+
+
 async def _do_rag_turn(
     session_id: str,
     user_id: str,
@@ -189,7 +230,17 @@ async def _do_rag_turn(
 ):
     total_start = time.monotonic()
 
-    memory, course = await asyncio.gather(load_memory(session_id), _load_course(session_id))
+    memory, course, previous_help = await asyncio.gather(
+        load_memory(session_id),
+        _load_course(session_id),
+        asyncio.to_thread(_previous_help_level, session_id, user_id),
+    )
+
+    # First turn: name the session beside the answer, not in front of it.
+    # (If the turn fails, asyncio.run cancels this — the title is cosmetic.)
+    title_task = None if memory else asyncio.create_task(
+        title_session(session_id, message, course["name"], _publish_to_ws)
+    )
 
     if prefers_video is not None and mode != "review":
         response_format = "video" if prefers_video else "text"
@@ -203,10 +254,9 @@ async def _do_rag_turn(
     if images:
         response_format = "text"
 
-    # Stream the text answer for BOTH text and video responses. In video mode
-    # the persistent live avatar speaks in parallel, so streaming the transcript
-    # lets the student start reading in ~2-3s instead of waiting the full
-    # generate + TTS + avatar-render pipeline.
+    # Stream the text answer for BOTH text and video responses. In video mode,
+    # the recorded clip is rendered after the answer, so streaming lets the
+    # student start reading in ~2-3s instead of waiting for that pipeline.
     should_stream_text = True
 
     def _on_progress(stage: str, label: str) -> None:
@@ -246,6 +296,7 @@ async def _do_rag_turn(
             # Progressive scaffolding — a doctoral course should not be
             # taught like a first-year one (Proposal §2.2).
             academic_level=course.get("academic_level"),
+            previous_help=previous_help,
         )
     except Exception as e:
         error_result = {"error": str(e), "status": "failed"}
@@ -317,6 +368,11 @@ async def _do_rag_turn(
             "video_ms": video_ms,
             "sources": len(result.get("sources") or []),
             "had_images": bool(images),
+            # The help ladder: which rung this answer used, and whether a full
+            # solution was asked for. Read back by the next turn and by the
+            # lecturer's attention list.
+            "help_level": result.get("help_level"),
+            "help_asked": result.get("help_asked", False),
         },
     )
 
@@ -327,9 +383,13 @@ async def _do_rag_turn(
         # Repeated on the terminal push so a client that reconnected mid-turn,
         # or missed the earlier `sources` event, can still render citations.
         "sources": result.get("sources", []),
+        # Drives the "next hint / full solution" buttons under a hint.
+        "help_level": result.get("help_level"),
         **delivery,
     }
     _publish_to_ws(session_id, final_result)
+    if title_task:
+        await title_task
     return final_result
 
 
@@ -384,23 +444,32 @@ async def _do_mode_session_start(
 
     ai_start = time.monotonic()
 
+    async def _title_from(prompt_text: str) -> None:
+        await title_session(session_id, prompt_text, course_name, _publish_to_ws)
+
     if mode == "review":
         _publish_status(session_id, "preparing", "Preparing your first question")
-        item, contexts = await generate_review_item(
-            session_type=session_type,
-            difficulty=difficulty,
-            course_id=course_id,
-            course_name=course_name,
-            difficulty_descriptors=difficulty_descriptors,
+        item, contexts = await asyncio.wait_for(
+            generate_review_item(
+                session_type=session_type,
+                difficulty=difficulty,
+                course_id=course_id,
+                course_name=course_name,
+                difficulty_descriptors=difficulty_descriptors,
+            ),
+            timeout=float(os.getenv("REVIEW_QUESTION_TIMEOUT_SECONDS", "55")),
         )
         prompt_text = format_review_prompt(item)
-        await _stream_mode_text(
-            session_id,
-            mode="review",
-            message_type="prompt",
-            content=prompt_text,
-            step=1,
-            total_steps=10,
+        await asyncio.gather(
+            _stream_mode_text(
+                session_id,
+                mode="review",
+                message_type="prompt",
+                content=prompt_text,
+                step=1,
+                total_steps=10,
+            ),
+            _title_from(prompt_text),
         )
         ai_ms = int((time.monotonic() - ai_start) * 1000)
 
@@ -462,13 +531,16 @@ async def _do_mode_session_start(
         difficulty_descriptors=difficulty_descriptors,
     )
     prompt_text = format_application_prompt(scenario, step=1)
-    await _stream_mode_text(
-        session_id,
-        mode="application",
-        message_type="prompt",
-        content=prompt_text,
-        step=1,
-        total_steps=3,
+    await asyncio.gather(
+        _stream_mode_text(
+            session_id,
+            mode="application",
+            message_type="prompt",
+            content=prompt_text,
+            step=1,
+            total_steps=3,
+        ),
+        _title_from(prompt_text),
     )
     ai_ms = int((time.monotonic() - ai_start) * 1000)
 
@@ -582,6 +654,32 @@ def process_ingestion_task(
     return {"document_id": document_id, "status": "complete"}
 
 
+@shared_task
+def process_video_ingestion_task(
+    document_id: str, filename: str, course_id: str, default_mode: str, difficulty: str,
+):
+    """Transcribe and index a lecture video. Same queue as documents: it is the
+    same pipeline after the transcript, and the transcription itself is one
+    network call that ElevenLabs makes to fetch the media."""
+    from app.ai.ingestion.service import process_video_background
+
+    reset_async_supabase()
+    try:
+        asyncio.run(process_video_background(document_id, filename, course_id, default_mode, difficulty))
+    except Exception as e:
+        # process_video_background records ordinary pipeline failures itself;
+        # this catches failures that happen before it can do so.
+        logger.exception("process_video_ingestion_task failed  doc=%s: %s", document_id, e)
+        try:
+            get_supabase().table("documents").update({"status": "failed"}).eq(
+                "id", document_id
+            ).execute()
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not record video ingestion failure for %s", document_id)
+        return {"document_id": document_id, "status": "failed"}
+    return {"document_id": document_id, "status": "complete"}
+
+
 # Render tasks deliberately live in app/media/render/tasks.py, not here — see
 # the CELERY_INCLUDE note in app/core/celery_app.py. The API dispatches them by
 # name so it never imports manim.
@@ -647,6 +745,7 @@ async def _do_mode_session_turn(
         evaluate_application_answer,
         format_application_prompt,
         asked_summary,
+        misconception_label,
     )
 
     supabase = get_supabase()
@@ -801,16 +900,39 @@ async def _do_mode_session_turn(
     # REVIEW                                                               #
     # ------------------------------------------------------------------ #
     _publish_status(session_id, "evaluating", "Evaluating your answer")
+    review_topic = pending_payload.get("topic") or None
     eval_out = await evaluate_review_answer(
         item=pending_payload,
         student_answer=student_answer,
         contexts=contexts,
         course_name=course_name,
+        known_misconceptions=await asyncio.to_thread(
+            _known_misconceptions, course_id, review_topic
+        ),
     )
     ai_ms = int((time.monotonic() - ai_start) * 1000)
 
+    # Feeds the lecturer's misconception radar and the student's timeline.
+    label = misconception_label(eval_out)
+    if label:
+        events.emit(
+            events.MISCONCEPTION_DETECTED,
+            user_id=user_id, course_id=course_id, topic=review_topic,
+            session_id=session_id,
+            payload={"label": label, "verdict": eval_out.get("verdict")},
+        )
+
     score = float(eval_out.get("score", 0.0))
     next_difficulty = adjust_difficulty(difficulty, score)
+
+    # Review is unaided practice, the most frequent evidence a student gives,
+    # so it counts towards mastery alongside exams. "partial" is not mastery.
+    if pending_payload.get("topic"):
+        await asyncio.to_thread(
+            mastery.record_attempt,
+            student_id=user_id, course_id=course_id, topic=pending_payload["topic"],
+            correct=eval_out.get("verdict") == "correct", source="review",
+        )
 
     feedback_text = (
         f"Verdict: {eval_out['verdict']}\n"
@@ -876,13 +998,16 @@ async def _do_mode_session_turn(
     # a question from the same course, the same band and the same chunks, and
     # hands back the question it just asked with the options shuffled.
     asked_so_far = list(pending_payload.get("_asked") or [])
-    item2, ctx2 = await generate_review_item(
-        session_type=session_type,
-        difficulty=next_difficulty,
-        course_id=course_id,
-        course_name=course_name,
-        difficulty_descriptors=difficulty_descriptors,
-        asked=asked_so_far,
+    item2, ctx2 = await asyncio.wait_for(
+        generate_review_item(
+            session_type=session_type,
+            difficulty=next_difficulty,
+            course_id=course_id,
+            course_name=course_name,
+            difficulty_descriptors=difficulty_descriptors,
+            asked=asked_so_far,
+        ),
+        timeout=float(os.getenv("REVIEW_QUESTION_TIMEOUT_SECONDS", "55")),
     )
     asked_so_far.append(asked_summary(item2))
     next_prompt = format_review_prompt(item2)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core import assignments, events
 from app.core.auth import auth_guard
 from app.core.enrolment import (
     PARTICIPATING_STATUSES,
@@ -13,7 +15,12 @@ from app.core.enrolment import (
 )
 from app.db.supabase import get_supabase, get_user_client
 from app.media.storage_service import STUDENT_UPLOADS_BUCKET, signed_url
-from app.models.models import VideoToggle, SessionModeUpdate, SessionCreateRequest, SessionTitleUpdate
+from app.models.models import (
+    SessionArchiveUpdate, SessionCreateRequest, SessionModeUpdate, SessionPinUpdate,
+    SessionTitleUpdate, VideoToggle,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -103,17 +110,42 @@ def list_sessions(
     user=Depends(auth_guard),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    archived: bool = Query(False, description="True lists only archived sessions"),
 ):
-    """Return all sessions for the authenticated user, newest first."""
+    """Return the user's sessions, newest first.
+
+    Archived sessions are left out of the sidebar list and shown on their own
+    page (``?archived=true``). Pinned sessions come back flagged; the client
+    groups them at the top.
+    """
     supabase = get_user_client(user["token"])
-    rows = (
-        supabase.table("sessions")
-        .select("id, current_mode, prefers_video, started_at, ended_at, course_id")
-        .eq("user_id", user["id"])
-        .order("started_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
-    )
+
+    def _rows(columns: str, *, filter_archived: bool):
+        query = supabase.table("sessions").select(columns).eq("user_id", user["id"])
+        if filter_archived:
+            query = (
+                query.not_.is_("archived_at", "null") if archived
+                else query.is_("archived_at", "null")
+            )
+        return (
+            query.order("started_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+
+    base_columns = "id, current_mode, prefers_video, started_at, ended_at, course_id"
+    try:
+        rows = _rows(base_columns + ", title, pinned_at, archived_at", filter_archived=True)
+    except Exception:
+        # sql/018 not applied: nothing can be archived yet, so the archive is
+        # empty and the main list is every session, as before.
+        if archived:
+            return {"sessions": [], "total": 0, "limit": limit, "offset": offset}
+        try:
+            rows = _rows(base_columns + ", title", filter_archived=False)
+        except Exception:
+            # sql/016 not applied either: no stored titles, every one is derived.
+            rows = _rows(base_columns, filter_archived=False)
     session_rows = rows.data or []
     session_ids = [row["id"] for row in session_rows]
     titles: dict[str, str] = {}
@@ -145,7 +177,8 @@ def list_sessions(
     sessions = []
     for row in session_rows:
         sid = row["id"]
-        title = titles.get(sid, "")
+        # A name the student chose wins over one derived from their first message.
+        title = (row.get("title") or "").strip() or titles.get(sid, "")
         sessions.append({
             "id": sid,
             "title": (title[:60] + ("…" if len(title) > 60 else "")) if title else "Session",
@@ -156,6 +189,8 @@ def list_sessions(
             "message_count": message_counts.get(sid, 0),
             "started_at": row.get("started_at"),
             "ended_at": row.get("ended_at"),
+            "pinned_at": row.get("pinned_at"),
+            "archived_at": row.get("archived_at"),
         })
     return {"sessions": sessions, "total": len(sessions), "limit": limit, "offset": offset}
 
@@ -202,6 +237,7 @@ def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
     # Starting a session is new work, so a completed enrolment is not enough.
     require_enrolment(user, payload.course_id, PARTICIPATING_STATUSES)
     require_mode_enabled(payload.course_id, mode)
+    assignments.require_unlocked(user["id"], payload.course_id)
 
     ins = supabase.table("sessions").insert({
         "user_id": user["id"],
@@ -215,6 +251,16 @@ def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
         raise HTTPException(status_code=500, detail="Failed to create session")
 
     row = ins.data[0]
+    # The database trigger is the source of truth for durable engagement.  The
+    # event is complementary research telemetry and also gives migrations a
+    # privacy-safe recovery source after a student deletes the chat itself.
+    events.emit(
+        events.SESSION_STARTED,
+        user_id=user["id"],
+        course_id=row["course_id"],
+        session_id=row["id"],
+        payload={"mode": row["current_mode"]},
+    )
     return {
         "session_id": row["id"],
         "course_id": row["course_id"],
@@ -222,6 +268,15 @@ def create_session(payload: SessionCreateRequest, user=Depends(auth_guard)):
         "prefers_video": row["prefers_video"],
         "started_at": row.get("started_at"),
     }
+
+
+@router.get("/activities/{course_id}")
+def list_activities(course_id: str, user=Depends(auth_guard)):
+    """What the lecturer has assigned this student on the course (Intervention
+    Studio), and whether an unfinished required one locks other study."""
+    require_enrolment(user, course_id)
+    items = assignments.for_student(user["id"], course_id)
+    return {"activities": items, "locked": bool(assignments.blocking(user["id"], course_id))}
 
 
 @router.get("/{session_id}")
@@ -341,8 +396,11 @@ def get_conversations(
 
     # Verify the session exists and belongs to this user (RLS filters by ownership,
     # but we want a clean 404 rather than an empty conversations list on bad IDs).
-    if not supabase.table("sessions").select("id").eq("id", sid).execute().data:
+    owned = supabase.table("sessions").select("id, course_id").eq("id", sid).execute().data
+    if not owned:
         raise HTTPException(status_code=404, detail="Session not found")
+    # Reopening an old session is locked while a required activity waits.
+    assignments.require_unlocked(user["id"], owned[0]["course_id"], sid)
 
     columns = (
         "id,mode,user_input,tutor_response,response_format,"
@@ -387,11 +445,57 @@ def rename_session(session_id: str, payload: SessionTitleUpdate, user=Depends(au
     supabase = get_user_client(user["token"])
     if not supabase.table("sessions").select("id").eq("id", sid).execute().data:
         raise HTTPException(status_code=404, detail="Session not found")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title cannot be blank")
     try:
-        supabase.table("sessions").update({"title": payload.title}).eq("id", sid).execute()
-    except Exception:
-        pass  # graceful no-op if title column hasn't been added to the schema yet
-    return {"session_id": sid, "title": payload.title}
+        supabase.table("sessions").update({"title": title}).eq("id", sid).execute()
+    except Exception as exc:
+        # This used to pass silently, so renames "succeeded" and reverted on the
+        # next refresh. Say so instead: the fix is applying sql/016.
+        logger.warning("Session rename failed for %s: %s", sid, exc)
+        raise HTTPException(
+            status_code=503, detail="Renaming sessions is not available yet."
+        ) from exc
+    return {"session_id": sid, "title": title}
+
+
+def _set_session_flags(session_id: str, user: dict, updates: dict) -> None:
+    """Write pin/archive columns on the caller's own session.
+
+    The user client means RLS decides ownership, exactly as for rename; a
+    session that is not theirs reads as missing.
+    """
+    sid = _validate_uuid(session_id)
+    supabase = get_user_client(user["token"])
+    if not supabase.table("sessions").select("id").eq("id", sid).execute().data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        supabase.table("sessions").update(updates).eq("id", sid).execute()
+    except Exception as exc:
+        logger.warning("Session flag update failed for %s: %s", sid, exc)
+        raise HTTPException(
+            status_code=503, detail="Pinning and archiving are not available yet."
+        ) from exc
+
+
+@router.patch("/{session_id}/pin")
+def pin_session(session_id: str, payload: SessionPinUpdate, user=Depends(auth_guard)):
+    pinned_at = _now_iso() if payload.pinned else None
+    _set_session_flags(session_id, user, {"pinned_at": pinned_at})
+    return {"session_id": session_id, "pinned_at": pinned_at}
+
+
+@router.patch("/{session_id}/archive")
+def archive_session(session_id: str, payload: SessionArchiveUpdate, user=Depends(auth_guard)):
+    archived_at = _now_iso() if payload.archived else None
+    # Archiving unpins: an archived session is out of the sidebar, so a pin
+    # on it would be invisible and would resurface oddly on unarchive.
+    updates = {"archived_at": archived_at}
+    if payload.archived:
+        updates["pinned_at"] = None
+    _set_session_flags(session_id, user, updates)
+    return {"session_id": session_id, "archived_at": archived_at}
 
 
 @router.post("/{session_id}/end")

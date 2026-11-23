@@ -26,10 +26,10 @@ def join_course(payload: JoinPayload, user=Depends(auth_guard)):
     """Redeem an invite code.
 
     All validation, the uses_count increment and the enrolment insert happen
-    inside one SQL transaction (redeem_invite_code) so two students racing for
+    inside one SQL transaction (redeem_invite_code_for) so two students racing for
     the last seat cannot both win.
     """
-    enrolment = redeem_code(payload.code, user["token"])
+    enrolment = redeem_code(payload.code, user["id"])
     events.emit(
         events.ENROLMENT_CREATED,
         user_id=user["id"],
@@ -42,13 +42,23 @@ def join_course(payload: JoinPayload, user=Depends(auth_guard)):
 @router.get("")
 def list_my_enrolments(user=Depends(auth_guard)):
     """Every course this student is on. RLS restricts this to their own rows."""
-    rows = (
-        get_user_client(user["token"])
-        .table("enrolments")
-        .select("id, course_id, status, enrolled_at, completed_at")
-        .order("enrolled_at", desc=True)
-        .execute()
-        .data
-        or []
+    client = get_user_client(user["token"])
+    columns = (
+        "id, course_id, status, enrolled_at, completed_at, "
+        "first_started_at, last_activity_at"
     )
+    try:
+        result = (
+            client.table("enrolments").select(columns)
+            .order("enrolled_at", desc=True).execute()
+        )
+    except Exception:
+        # Migration 028 may be applied immediately after a zero-downtime code
+        # release; keep course access working during that short overlap.
+        result = (
+            client.table("enrolments")
+            .select("id, course_id, status, enrolled_at, completed_at")
+            .order("enrolled_at", desc=True).execute()
+        )
+    rows = result.data or []
     return {"enrolments": rows}

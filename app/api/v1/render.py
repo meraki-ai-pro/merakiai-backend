@@ -23,7 +23,7 @@ from app.media.render.routing import (
     known_archetypes,
     render_queue,
 )
-from app.media.render.service import playable_asset, request_render
+from app.media.render.service import playable_asset, request_render, video_library
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +325,104 @@ def review_asset(asset_id: str, payload: ReviewPayload, user=Depends(lecturer_gu
         "approved": payload.approved,
         "superseded": superseded,
     }
+
+
+@router.delete("/{asset_id}")
+def delete_asset(asset_id: str, user=Depends(lecturer_guard)):
+    """Remove a video: the row, and the file behind it.
+
+    Deleting a live video takes it away from students on their next answer —
+    approved_concept_keys and playable_asset both read these rows. Deleting one
+    still rendering is allowed too, so a lecturer can clear a job that is stuck;
+    the worker's later status write then updates nothing.
+    """
+    from app.media.render.service import RENDERED_MEDIA_BUCKET
+
+    sb = get_supabase()
+    rows = (
+        sb.table("media_assets")
+        .select("id, course_id, storage_path, concept_key")
+        .eq("id", asset_id)
+        .execute()
+        .data
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    asset = rows[0]
+    assert_course_owner(user, asset["course_id"])
+
+    sb.table("media_assets").delete().eq("id", asset_id).execute()
+
+    if asset.get("storage_path"):
+        try:
+            sb.storage.from_(RENDERED_MEDIA_BUCKET).remove([asset["storage_path"]])
+        except Exception as exc:  # noqa: BLE001 — the row is gone; an orphan file is harmless
+            logger.warning("Could not remove file for deleted asset %s: %s", asset_id, exc)
+
+    return {"status": "ok", "asset_id": asset_id}
+
+
+@router.get("/watch/{course_id}/{document_id}")
+def watch_video_source(course_id: str, document_id: str, t: int = 0, user=Depends(auth_guard)):
+    """Student-facing: a lecture video cited as a source, opened at second ``t``.
+
+    Only a published, live document on a course the student is enrolled on —
+    the same bar a passage has to clear to be cited in the first place.
+    """
+    from app.ai.ingestion.video import watch_url
+    from app.media.storage_service import COURSE_VIDEOS_BUCKET, signed_url
+
+    require_enrolment(user, course_id)
+    rows = (
+        get_supabase().table("documents")
+        .select("storage_path, media_url, is_published, deleted_at")
+        .eq("id", document_id).eq("course_id", course_id).execute().data
+    )
+    doc = rows[0] if rows else None
+    if not doc or not doc.get("is_published") or doc.get("deleted_at"):
+        raise HTTPException(status_code=404, detail="Video not found")
+    url = doc.get("media_url") or (
+        signed_url(COURSE_VIDEOS_BUCKET, doc["storage_path"], ttl_seconds=3 * 3600)
+        if doc.get("storage_path") else None
+    )
+    if not url:
+        raise HTTPException(status_code=404, detail="This source is not a video")
+    return {"url": watch_url(url, t)}
+
+
+@router.get("/library/{course_id}")
+def get_video_library(course_id: str, user=Depends(auth_guard)):
+    """Student-facing: every approved concept video on the course (Manim and
+    Remotion alike), so a student can watch them outside an answer."""
+    require_enrolment(user, course_id)
+    from app.ai.ingestion.video import VIDEO_CONTENT_TYPES
+
+    # Lecture videos the lecturer added as course material (sql/023), opened
+    # through /render/watch like a cited one.
+    docs = (
+        get_supabase().table("documents")
+        .select("id, title, source_filename, media_url, topic, created_at, deleted_at")
+        .eq("course_id", course_id).eq("is_published", True).eq("status", "ready")
+        .order("created_at", desc=True).execute().data or []
+    )
+    lectures = [
+        {"document_id": d["id"], "title": _lecture_title(d)}
+        for d in docs
+        if not d.get("deleted_at") and (
+            d.get("media_url")
+            or (d.get("source_filename") or "").rsplit(".", 1)[-1].lower() in VIDEO_CONTENT_TYPES
+        )
+    ]
+    return {"videos": video_library(course_id), "lectures": lectures}
+
+
+def _lecture_title(document: dict) -> str:
+    """A student-facing label that never leaks a hosted video's raw URL."""
+    title = str(document.get("title") or document.get("source_filename") or "").strip()
+    if title and not title.lower().startswith(("http://", "https://")):
+        return title
+    topic = str(document.get("topic") or "").strip()
+    return topic or "Lecture video"
 
 
 @router.get("/concept/{course_id}/{concept_key}")

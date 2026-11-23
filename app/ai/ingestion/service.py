@@ -152,13 +152,18 @@ def parse_target_modes(raw: str | None, default_mode: str) -> list[str] | None:
     return list(dict.fromkeys(modes))
 
 
-async def ingest_document(
-    file, course_id, doc_type, default_mode, difficulty, version, user_id,
+def register_document(
+    filename, course_id, doc_type, default_mode, difficulty, version, user_id,
     target_modes: list[str] | None = None,
     is_published: bool = True,
     topic: str | None = None,
     question_formats: list[str] | None = None,
-):
+    extra: dict | None = None,
+) -> dict:
+    """Insert the documents row (status 'processing') and return it.
+
+    ``extra`` is for columns only some sources have (a video's media_url).
+    """
     doc_type = _resolve_doc_type(doc_type)
     default_mode = _resolve_default_mode(default_mode, doc_type)
     difficulty = _resolve_difficulty(difficulty)
@@ -166,8 +171,8 @@ async def ingest_document(
     supabase = get_supabase()
 
     row = {
-        "title": file.filename,
-        "source_filename": file.filename,
+        "title": filename,
+        "source_filename": filename,
         "course_id": course_id,
         "doc_type": doc_type,
         "default_mode": default_mode,
@@ -188,6 +193,7 @@ async def ingest_document(
         # lecturer actually chose formats. A NULL means "any format", which is
         # what every file uploaded before this feature existed should keep.
         "question_formats": question_formats or None,
+        **(extra or {}),
     }
 
     # 1. Register document (FAST)
@@ -203,9 +209,23 @@ async def ingest_document(
 
     if not doc_response.data:
         raise RuntimeError("Failed to register document in database.")
+    return doc_response.data[0]
 
-    doc = doc_response.data[0]
+
+async def ingest_document(
+    file, course_id, doc_type, default_mode, difficulty, version, user_id,
+    target_modes: list[str] | None = None,
+    is_published: bool = True,
+    topic: str | None = None,
+    question_formats: list[str] | None = None,
+):
+    doc = register_document(
+        file.filename, course_id, doc_type, default_mode, difficulty, version, user_id,
+        target_modes=target_modes, is_published=is_published, topic=topic,
+        question_formats=question_formats,
+    )
     document_id = doc["id"]
+    doc_type, default_mode, difficulty = doc["doc_type"], doc["default_mode"], doc["difficulty"]
 
     # Read file content now — the upload stream closes after the response
     file_content = await file.read()
@@ -382,69 +402,109 @@ async def process_document_background(
         # embedded like any other content (network I/O; no-op without a provider).
         blocks = await apply_math_ocr(blocks, file_content, filename)
 
-        # 4. Chunk parent-child, nothing dropped for being short (CPU bound)
-        chunks = await asyncio.to_thread(
-            build_chunks,
-            blocks,
-            document_id=document_id,
-            source_filename=filename,
-            mode=default_mode,
-            difficulty=difficulty,
-            course_id=course_id,
-        )
-
-        if not chunks:
-            supabase.table("documents").update({"status": "no_content"}).eq(
-                "id", document_id
-            ).execute()
-            return
-
-        # 5. Embed the breadcrumbed text so each vector knows its topic.
-        # Done once regardless of how many modes the document serves — the
-        # vectors are identical, only the namespace and the stamped mode differ.
-        embeddings = await embed_chunks([c["embed_text"] for c in chunks])
-
-        # 6. Upsert into the current-generation namespace of every target mode
-        modes = _resolve_target_modes(supabase, document_id, default_mode)
-
-        for mode in modes:
-            namespace = namespace_for(course_id, mode)
-            pinecone_ids = await asyncio.to_thread(
-                upsert_chunks, embeddings, chunks, namespace=namespace, mode=mode
-            )
-
-            # 7. Batch store chunk metadata, per namespace
-            batch_metadata = [
-                {
-                    "document_id": document_id,
-                    "pinecone_id": pid,
-                    "pinecone_namespace": namespace,
-                    "mode": mode,
-                    "topic": chunk.get("topic"),
-                    "difficulty": difficulty,
-                    "content_hash": hashlib.sha256(chunk["text"].encode()).hexdigest(),
-                }
-                for chunk, pid in zip(chunks, pinecone_ids)
-            ]
-
-            if batch_metadata:
-                _store_chunk_rows(supabase, batch_metadata, mode, filename)
-
-        # 8. Mark Ready
-        supabase.table("documents").update(
-            {"status": "ready", "total_chunks": len(chunks)}
-        ).eq("id", document_id).execute()
-
-        logger.info(
-            "Ingested %s: %d chunks (%d with maths) -> %s",
-            filename,
-            len(chunks),
-            sum(1 for c in chunks if c.get("has_math")),
-            namespace,
-        )
+        await _index_blocks(supabase, blocks, document_id, filename, course_id, default_mode, difficulty)
 
     except Exception as e:
         logger.error(f"Background ingestion failed for {document_id}: {str(e)}", exc_info=True)
         supabase.table("documents").update({"status": "failed"}).eq(
             "id", document_id
         ).execute()
+
+
+async def _index_blocks(supabase, blocks, document_id, filename, course_id, default_mode, difficulty):
+    """Chunk, embed and upsert parsed blocks, then mark the document ready."""
+    # 4. Chunk parent-child, nothing dropped for being short (CPU bound)
+    chunks = await asyncio.to_thread(
+        build_chunks,
+        blocks,
+        document_id=document_id,
+        source_filename=filename,
+        mode=default_mode,
+        difficulty=difficulty,
+        course_id=course_id,
+    )
+
+    if not chunks:
+        # documents_status_check allows processing|ready|failed only; the
+        # 'no_content' this used to write was itself rejected, leaving an
+        # empty file "processing" for ever.
+        supabase.table("documents").update({"status": "failed"}).eq(
+            "id", document_id
+        ).execute()
+        return
+
+    # 5. Embed the breadcrumbed text so each vector knows its topic.
+    # Done once regardless of how many modes the document serves — the
+    # vectors are identical, only the namespace and the stamped mode differ.
+    embeddings = await embed_chunks([c["embed_text"] for c in chunks])
+
+    # 6. Upsert into the current-generation namespace of every target mode
+    modes = _resolve_target_modes(supabase, document_id, default_mode)
+
+    for mode in modes:
+        namespace = namespace_for(course_id, mode)
+        pinecone_ids = await asyncio.to_thread(
+            upsert_chunks, embeddings, chunks, namespace=namespace, mode=mode
+        )
+
+        # 7. Batch store chunk metadata, per namespace
+        batch_metadata = [
+            {
+                "document_id": document_id,
+                "pinecone_id": pid,
+                "pinecone_namespace": namespace,
+                "mode": mode,
+                "topic": chunk.get("topic"),
+                "difficulty": difficulty,
+                "content_hash": hashlib.sha256(chunk["text"].encode()).hexdigest(),
+            }
+            for chunk, pid in zip(chunks, pinecone_ids)
+        ]
+
+        if batch_metadata:
+            _store_chunk_rows(supabase, batch_metadata, mode, filename)
+
+    # 8. Mark Ready
+    supabase.table("documents").update(
+        {"status": "ready", "total_chunks": len(chunks)}
+    ).eq("id", document_id).execute()
+
+    logger.info(
+        "Ingested %s: %d chunks (%d with maths) -> %s",
+        filename,
+        len(chunks),
+        sum(1 for c in chunks if c.get("has_math")),
+        namespace,
+    )
+
+
+async def process_video_background(
+    document_id: str,
+    filename: str,
+    course_id: str,
+    default_mode: str,
+    difficulty: str,
+):
+    """Transcribe a lecture video (uploaded or linked), then index the transcript."""
+    from app.ai.ingestion.video import transcribe, transcript_blocks
+    from app.media.storage_service import COURSE_VIDEOS_BUCKET, signed_url
+
+    supabase = get_supabase()
+    try:
+        doc = supabase.table("documents").select("storage_path, media_url").eq(
+            "id", document_id
+        ).execute().data[0]
+        if doc.get("media_url"):
+            words = await transcribe(link=doc["media_url"])
+        else:
+            # Long enough for ElevenLabs to fetch a large file.
+            url = signed_url(COURSE_VIDEOS_BUCKET, doc["storage_path"], ttl_seconds=6 * 3600)
+            if not url:
+                raise RuntimeError("The uploaded video is not in storage.")
+            words = await transcribe(file_url=url)
+        await _index_blocks(
+            supabase, transcript_blocks(words), document_id, filename, course_id, default_mode, difficulty
+        )
+    except Exception as e:
+        logger.error("Video ingestion failed for %s: %s", document_id, e, exc_info=True)
+        supabase.table("documents").update({"status": "failed"}).eq("id", document_id).execute()

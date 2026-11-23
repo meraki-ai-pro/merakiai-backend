@@ -16,7 +16,10 @@ def client_options() -> Dict[str, Any]:
     if not api_key:
         raise RuntimeError("Missing ANTHROPIC_API_KEY environment variable.")
 
-    options: Dict[str, Any] = {"api_key": api_key}
+    # The SDK has its own retry loop by default.  The application already
+    # retries transient failures with jitter, so leaving both enabled can turn
+    # one slow request into several minutes of invisible nested retries.
+    options: Dict[str, Any] = {"api_key": api_key, "max_retries": 0}
     workspace_id = os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip()
     if workspace_id:
         options["default_headers"] = {"anthropic-workspace-id": workspace_id}

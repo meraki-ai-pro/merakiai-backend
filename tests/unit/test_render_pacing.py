@@ -46,10 +46,13 @@ class TestManimPromptAsksForPacing:
 
 
 class TestPlaybackStretch:
-    def test_the_default_is_slower_than_real_time(self):
+    def test_the_default_plays_at_real_time(self):
+        """0.85 answered "too fast"; the next round reported "very slow". Pacing
+        now comes from beat-aligned narration holding frames where the voice
+        needs it, so a uniform slow-motion on top would drag every animation."""
         from app.media.render.manim_renderer import MANIM_SPEED
 
-        assert 0 < MANIM_SPEED < 1, "the default must actually slow renders down"
+        assert MANIM_SPEED == 1.0
 
     def test_a_speed_of_one_is_a_no_op(self, tmp_path):
         """So a deployment can turn it off without the code inventing work."""

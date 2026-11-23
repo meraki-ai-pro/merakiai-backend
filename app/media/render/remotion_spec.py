@@ -41,6 +41,12 @@ STEP_SECONDS = 4.5
 # read.
 CHART_SECONDS = 8.0
 
+# Title card, and a moment to read the last frame. Mirrored by TITLE_SECONDS /
+# TAIL_SECONDS in remotion/src/types.ts, which Lesson.tsx now also uses for its
+# sections — it used to hard-code its own lengths and cut steps off early.
+TITLE_SECONDS = 3.0
+TAIL_SECONDS = 2.5
+
 
 class Slide(BaseModel):
     title: str = Field(..., max_length=120)
@@ -122,7 +128,31 @@ class RemotionSpec(BaseModel):
         from_chart = CHART_SECONDS if self.chart else 0.0
         # Title card plus a moment to read the last frame. The tail is 2.5s
         # rather than 1.5 so the closing frame can actually be read.
-        return round(3.0 + from_slides + from_steps + from_chart + 2.5, 2)
+        return round(TITLE_SECONDS + from_slides + from_steps + from_chart + TAIL_SECONDS, 2)
+
+    def beats(self) -> list[dict]:
+        """The timeline Lesson.tsx plays, section by section, in order.
+
+        Known exactly from the spec — Remotion executes no generated code, so
+        what is on screen at second t is a pure function of these fields.
+        """
+        sections: list[tuple[float, str]] = [(TITLE_SECONDS, f"Title card: {self.title}")]
+        for slide in self.slides:
+            sections.append((slide.seconds, f"Slide: {slide.title}. {slide.body or ''}".strip()))
+        for i, step in enumerate(self.steps, 1):
+            sections.append(
+                (STEP_SECONDS, f"Step {i} appears: {step.label}. {step.detail or ''}".strip())
+            )
+        if self.chart:
+            axes = " vs ".join(t for t in (self.chart.y_title, self.chart.x_title) if t)
+            sections.append((CHART_SECONDS, f"{self.chart.kind} chart grows in{': ' + axes if axes else ''}"))
+        sections.append((TAIL_SECONDS, "Closing frame holds"))
+
+        beats, cursor = [], 0.0
+        for seconds, label in sections:
+            beats.append({"start": round(cursor, 3), "end": round(cursor + seconds, 3), "label": label})
+            cursor += seconds
+        return beats
 
 
 def validate_spec(raw: dict) -> RemotionSpec:

@@ -102,7 +102,7 @@ async def tavus_webhook(session_id: str, request: Request):
             "type": "video_ready",
             "response_format": "video",
             "video_url": video_url,
-            "subtitle_url": "",   # Tavus BYOA does not generate VTT subtitles
+            "subtitles_url": "",   # Tavus BYOA does not generate VTT subtitles
             "source": "tavus",
         })
 

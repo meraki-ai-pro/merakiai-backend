@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from celery.result import AsyncResult
 
 from app.core.auth import auth_guard
 from app.core.enrolment import (
@@ -17,7 +16,6 @@ from app.media.stt_service import transcribe_audio
 from app.ai.rag.modes_sessions.service import GENERAL_SCENARIO
 from app.models.models import ModeSessionStartRequest, ModeSessionTurnRequest
 from app.ai.tasks import process_mode_session_start_task, process_mode_session_turn_task
-from app.core.celery_app import celery_app
 
 router = APIRouter(prefix="/mode-sessions", tags=["Mode Sessions"])
 
@@ -96,14 +94,6 @@ def list_mode_sessions(
         "limit": limit,
         "offset": offset,
     }
-
-
-@router.get("/status/{task_id}")
-async def get_mode_session_task_status(task_id: str, user=Depends(auth_guard)):
-    res = AsyncResult(task_id, app=celery_app)
-    if res.ready():
-        return res.result if res.successful() else {"status": "failed", "error": str(res.result)}
-    return {"status": "processing"}
 
 
 @router.post("/start")

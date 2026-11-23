@@ -16,16 +16,16 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import assert_course_owner, lecturer_guard
 from app.db.supabase import get_supabase
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/courses/{course_id}/analytics", tags=["Lecturer – Analytics"])
+router = APIRouter(prefix="/courses/{course_id}/analytics", tags=["Instructor – Analytics"])
 
 
 def _safe(fn, default):
@@ -37,16 +37,27 @@ def _safe(fn, default):
         return default
 
 
+def _course_enrolments(sb, course_id: str) -> list[dict]:
+    """Read durable engagement columns, with a pre-migration fallback."""
+    try:
+        return (
+            sb.table("enrolments")
+            .select("status, student_id, first_started_at, last_activity_at")
+            .eq("course_id", course_id).execute().data or []
+        )
+    except Exception:
+        return (
+            sb.table("enrolments").select("status, student_id")
+            .eq("course_id", course_id).execute().data or []
+        )
+
+
 @router.get("")
 def course_analytics(course_id: str, user=Depends(lecturer_guard)):
     assert_course_owner(user, course_id)
     sb = get_supabase()
 
-    enrolments = _safe(
-        lambda: sb.table("enrolments").select("status, student_id")
-        .eq("course_id", course_id).execute().data or [],
-        [],
-    )
+    enrolments = _safe(lambda: _course_enrolments(sb, course_id), [])
     status_counts = Counter(e["status"] for e in enrolments)
     student_ids = [e["student_id"] for e in enrolments]
 
@@ -79,7 +90,15 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
     # "7 of 5 students have started" on a real dashboard and, worse, drove
     # enrolled_but_never_started to zero through the max() below.
     enrolled_ids = set(student_ids)
-    started_ids = {s["user_id"] for s in sessions} & enrolled_ids
+    durable_started_ids = {
+        e["student_id"] for e in enrolments if e.get("first_started_at")
+    }
+    # Live sessions remain a compatibility fallback until migration 028 is
+    # applied. Once populated, first_started_at survives deletion of every
+    # session and is the authoritative "ever started" fact.
+    started_ids = (
+        durable_started_ids | {s["user_id"] for s in sessions}
+    ) & enrolled_ids
     active_students = len(started_ids)
     staff_sessions = len({s["user_id"] for s in sessions} - enrolled_ids)
 
@@ -92,6 +111,11 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
             "withdrawn": status_counts.get("withdrawn", 0),
             "ever_opened_a_session": active_students,
             "enrolled_but_never_started": len(enrolled_ids) - active_students,
+            # Named, so the instructor can follow up with each one.
+            "never_started": sorted(
+                _people(sb, sorted(enrolled_ids - started_ids)).values(),
+                key=lambda p: (p["name"] or p["email"] or "").lower(),
+            ),
             # Surfaced separately rather than folded in, so a lecturer's own
             # testing is visible but never inflates the cohort figures.
             "non_student_session_users": staff_sessions,
@@ -103,6 +127,14 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
                 "review": mode_counts.get("review", 0),
                 "application": mode_counts.get("application", 0),
             },
+            # What the tutor actually delivered, per answer: text or video.
+            # Enrolled students only, like time on task.
+            "by_format": _safe(
+                lambda: _responses_by_format(
+                    sb, [x["id"] for x in sessions if x["user_id"] in enrolled_ids]
+                ),
+                {"text": 0, "video": 0},
+            ),
         },
         "knowledge": {
             "total": len(live_docs),
@@ -120,7 +152,14 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
         },
         "mastery": _mastery_summary(sb, course_id),
         "engagement": _engagement_summary(sb, course_id),
-        "time_on_task": _time_on_task(sessions),
+        # Enrolled students only: a lecturer testing their own course is not study time.
+        "time_on_task": _safe(
+            lambda: _time_on_task(_session_turns(
+                sb, [x["id"] for x in sessions if x["user_id"] in enrolled_ids]
+            )),
+            {"measured": False, "reason": "Study time is unavailable right now."},
+        ),
+        "activity": _daily_activity(sessions, enrolled_ids),
         # Named explicitly so the dashboard shows "not yet measured" rather
         # than a zero the lecturer would read as "no learning happened".
         # Empty now that time-on-task is derived from session timestamps —
@@ -130,60 +169,129 @@ def course_analytics(course_id: str, user=Depends(lecturer_guard)):
     }
 
 
-def _time_on_task(sessions: list[dict]) -> dict:
-    """Minutes actually spent studying, from session start/end timestamps.
+def _responses_by_format(sb, session_ids: list[str]) -> dict[str, int]:
+    """Tutor answers delivered as text vs video across these sessions.
 
-    Only CLOSED sessions count. An open session has no end time, and treating
-    "now" as the end would score a student who left a tab open overnight as the
-    most engaged in the cohort — which is precisely the number a lecturer would
-    act on and be wrong about.
-
-    The median is reported alongside the mean because the distribution is
-    heavily skewed: a handful of long sessions drag the mean well above what a
-    typical student does.
+    Counted server-side (count="exact", head only) in batches, so a busy course
+    costs a few small requests, not a transfer of every conversation row.
     """
-    durations: list[float] = []
-    open_sessions = 0
+    out = {"text": 0, "video": 0}
+    for i in range(0, len(session_ids), 150):  # keeps the IN list inside URL limits
+        batch = session_ids[i:i + 150]
+        for fmt in out:
+            res = (
+                sb.table("conversations").select("id", count="exact", head=True)
+                .in_("session_id", batch).eq("response_format", fmt).execute()
+            )
+            out[fmt] += res.count or 0
+    return out
 
-    for session in sessions:
-        started, ended = session.get("started_at"), session.get("ended_at")
-        if not ended:
-            open_sessions += 1
-            continue
-        try:
-            start = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
-            end = datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            continue
-        minutes = (end - start).total_seconds() / 60
-        # Clamped: clock skew produces negatives, and a session longer than
-        # four hours is an abandoned tab that was eventually closed, not study.
-        if 0 < minutes <= 240:
-            durations.append(minutes)
 
+# Session length bands, in whole minutes of active study, both ends inclusive.
+# The client asked for these exact, non-overlapping labels: the old "5–15" and
+# "15–30" both appeared to own a 15-minute session.
+SESSION_LENGTH_BUCKETS = ((0, 4, "<5 min"), (5, 15, "5–15 min"), (16, 30, "16–30 min"), (31, 60, "31–60 min"), (61, 10**9, "61+ min"))
+
+# A gap between two messages longer than this is a break, not study. Credited
+# at this cap, so reading a long answer counts but a tab left open does not.
+BREAK_MINUTES = 15
+
+
+def _parse_ts(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_turns(sb, session_ids: list[str]) -> dict[str, list[datetime]]:
+    """Message timestamps per session, sorted. Batched: an IN list of every
+    session id on a big course would overflow the request URL."""
+    turns: dict[str, list[datetime]] = {}
+    for i in range(0, len(session_ids), 200):
+        rows = (
+            sb.table("conversations").select("session_id, created_at")
+            .in_("session_id", session_ids[i:i + 200])
+            # Lecturer-sent lessons (Intervention Studio) are not the student studying.
+            .not_.like("user_input", "(system)%")
+            .limit(50000).execute().data or []
+        )
+        for r in rows:
+            ts = _parse_ts(r.get("created_at"))
+            if ts:
+                turns.setdefault(r["session_id"], []).append(ts)
+    return {sid: sorted(ts) for sid, ts in turns.items()}
+
+
+def _time_on_task(turns: dict[str, list[datetime]]) -> dict:
+    """Minutes actually spent studying, from the gaps between messages.
+
+    Students never close a session — nothing in the app ends one — so a
+    start/end measure covered almost no real sessions, and the end times that
+    did exist were set days later by clean-ups. Activity needs no close: each
+    gap between consecutive messages counts, capped at BREAK_MINUTES.
+
+    A one-message session has no gap to measure and is left out rather than
+    counted as zero. The median is reported beside the mean because a few
+    long sessions pull the mean up.
+    """
+    durations = [
+        sum(min((b - a).total_seconds() / 60, BREAK_MINUTES) for a, b in zip(ts, ts[1:]))
+        for ts in turns.values()
+        if len(ts) > 1
+    ]
     if not durations:
         return {
             "measured": False,
-            "reason": "No completed sessions yet.",
-            "open_sessions": open_sessions,
+            "reason": "No session has more than one question yet.",
+            "single_message_sessions": len(turns),
         }
 
     ordered = sorted(durations)
     middle = len(ordered) // 2
-    median = (
-        ordered[middle]
-        if len(ordered) % 2
-        else (ordered[middle - 1] + ordered[middle]) / 2
-    )
+    median = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
 
     return {
         "measured": True,
-        "completed_sessions": len(durations),
-        "open_sessions": open_sessions,
+        "sessions": len(durations),
+        "single_message_sessions": len(turns) - len(durations),
         "total_minutes": round(sum(durations)),
         "mean_minutes": round(sum(durations) / len(durations), 1),
         "median_minutes": round(median, 1),
+        "break_minutes": BREAK_MINUTES,
+        "histogram": [
+            {"bucket": label, "sessions": sum(lo <= round(m) <= hi for m in durations)}
+            for lo, hi, label in SESSION_LENGTH_BUCKETS
+        ],
     }
+
+
+ACTIVITY_DAYS = 30
+
+
+def _daily_activity(sessions: list[dict], enrolled_ids: set[str], today=None) -> list[dict]:
+    """Sessions started and distinct enrolled students, per UTC day, last 30 days.
+
+    Every day is present, including quiet ones — a gap in the line would read
+    as missing data rather than a day nobody studied.
+    """
+    today = today or datetime.now(timezone.utc).date()
+    days = [today - timedelta(days=i) for i in range(ACTIVITY_DAYS - 1, -1, -1)]
+    per_day = {d: {"sessions": 0, "students": set()} for d in days}
+    for session in sessions:
+        # Staff previewing a course must not appear as student activity. This
+        # mirrors the cohort and time-on-task filters above.
+        if session.get("user_id") not in enrolled_ids:
+            continue
+        started = _parse_ts(session.get("started_at"))
+        day = started.date() if started else None
+        if day in per_day:
+            per_day[day]["sessions"] += 1
+            per_day[day]["students"].add(session["user_id"])
+    return [
+        {"date": d.isoformat(), "sessions": v["sessions"], "students": len(v["students"])}
+        for d, v in per_day.items()
+    ]
 
 
 def _mastery_summary(sb, course_id: str) -> dict:
@@ -231,6 +339,8 @@ def _mastery_summary(sb, course_id: str) -> dict:
         "bands": buckets,
         "weakest_topics": weakest,
         "strongest_topics": strongest,
+        # Every topic, weakest first, for the chart.
+        "topics": ranked,
     }
 
 
@@ -343,6 +453,208 @@ def mastery_breakdown(course_id: str, user=Depends(lecturer_guard)):
     students.sort(key=lambda s: s["mean"])
 
     return {"measured": True, "topics": topics, "students": students}
+
+
+@router.get("/attention")
+def students_needing_attention(course_id: str, user=Depends(lecturer_guard)):
+    """Students in a situation the lecturer should act on, each with its reason.
+
+    The rules live in app/core/attention.py. Each source degrades on its own:
+    without the events stream the list still shows disengaged and stuck
+    students, just not declining or dependent ones.
+    """
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(days=60)).isoformat()
+
+    enrolled = [
+        e["student_id"] for e in _safe(
+            lambda: sb.table("enrolments").select("student_id")
+            .eq("course_id", course_id).eq("status", "active").execute().data or [],
+            [],
+        )
+    ]
+    if not enrolled:
+        return {"students": []}
+
+    sessions = _safe(
+        lambda: sb.table("sessions").select("user_id, started_at")
+        .eq("course_id", course_id).limit(20000).execute().data or [],
+        [],
+    )
+    mastery_events = _safe(
+        lambda: sb.table("events").select("user_id, topic, payload, created_at")
+        .eq("course_id", course_id).eq("event_type", "mastery.updated")
+        .gte("created_at", since).limit(20000).execute().data or [],
+        [],
+    )
+    turn_events = _safe(
+        # Only turns that carried a help rung — every Learn turn otherwise.
+        lambda: sb.table("events").select("user_id, payload")
+        .eq("course_id", course_id).eq("event_type", "turn.completed")
+        .gte("created_at", (now - timedelta(days=30)).isoformat())
+        .not_.is_("payload->>help_level", "null")
+        .limit(20000).execute().data or [],
+        [],
+    )
+    mastery_rows = _safe(
+        lambda: sb.table("mastery_states")
+        .select("student_id, topic, mastery_score, attempts_count")
+        .eq("course_id", course_id).limit(20000).execute().data or [],
+        [],
+    )
+
+    from app.core.attention import KINDS, flags_for_course
+
+    flagged = flags_for_course(
+        now=now, enrolled=enrolled, sessions=sessions,
+        mastery_events=mastery_events, turn_events=turn_events,
+        mastery_rows=mastery_rows,
+    )
+    people = _people(sb, list(flagged))
+    students = [{**people[sid], "flags": flags} for sid, flags in flagged.items()]
+    # Most urgent situation first, then most situations.
+    students.sort(key=lambda s: (KINDS.index(s["flags"][0]["kind"]), -len(s["flags"])))
+    return {"students": students}
+
+
+def _people(sb, student_ids: list[str]) -> dict[str, dict]:
+    """``{id: {student_id, name, email}}`` for display; unknown ids still get a row."""
+    found = _safe(
+        lambda: sb.table("users").select("id, first_name, last_name, email")
+        .in_("id", student_ids).execute().data or [],
+        [],
+    ) if student_ids else []
+    by_id = {p["id"]: p for p in found}
+    out = {}
+    for sid in student_ids:
+        p = by_id.get(sid, {})
+        name = " ".join(x for x in (p.get("first_name"), p.get("last_name")) if x).strip()
+        out[sid] = {"student_id": sid, "name": name or None, "email": p.get("email")}
+    return out
+
+
+@router.get("/tutor-activity")
+def tutor_activity(course_id: str, days: int = 7, user=Depends(lecturer_guard)):
+    """What the AI tutor did for this class, and the patterns worth questioning."""
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+    days = max(1, min(days, 90))
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    turns = _safe(
+        lambda: sb.table("events").select("user_id, session_id, payload, created_at")
+        .eq("course_id", course_id).eq("event_type", "turn.completed")
+        .gte("created_at", since).not_.is_("payload->>help_level", "null")
+        .limit(50000).execute().data or [],
+        [],
+    )
+    detected = _safe(
+        lambda: sb.table("events").select("id", count="exact")
+        .eq("course_id", course_id).eq("event_type", "misconception.detected")
+        .gte("created_at", since).limit(0).execute().count or 0,
+        0,
+    )
+
+    from app.core.tutor_insights import tutor_activity as summarise
+
+    result = summarise(turns)
+    people = _people(sb, [r["student_id"] for r in result["frequent_requesters"]])
+    result["frequent_requesters"] = [
+        {**people[r["student_id"]], "requests": r["requests"]}
+        for r in result["frequent_requesters"]
+    ]
+    result["counts"]["misconceptions_detected"] = detected
+    return {"days": days, **result}
+
+
+@router.get("/misconceptions")
+def misconceptions(course_id: str, days: int = 30, user=Depends(lecturer_guard)):
+    """Wrong beliefs shared by several students, most widespread first."""
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+    days = max(1, min(days, 180))
+    now = datetime.now(timezone.utc)
+
+    rows = _safe(
+        lambda: sb.table("events").select("user_id, topic, payload, created_at")
+        .eq("course_id", course_id).eq("event_type", "misconception.detected")
+        .gte("created_at", (now - timedelta(days=days)).isoformat())
+        .limit(20000).execute().data or [],
+        [],
+    )
+
+    from app.core.tutor_insights import misconception_radar
+
+    radar = misconception_radar(rows, now)
+    people = _people(sb, sorted({s for m in radar["misconceptions"] for s in m["student_ids"]}))
+    for m in radar["misconceptions"]:
+        m["students_list"] = [people[s] for s in m.pop("student_ids")]
+    return {"days": days, **radar}
+
+
+@router.get("/students/{student_id}/timeline")
+def student_timeline(course_id: str, student_id: str, user=Depends(lecturer_guard)):
+    """One student's significant moments in this course, oldest first."""
+    assert_course_owner(user, course_id)
+    sb = get_supabase()
+
+    # 404, not 403, and not an empty timeline: a lecturer must not be able to
+    # confirm that an arbitrary user id exists by probing it here.
+    enrolled = _safe(
+        lambda: sb.table("enrolments").select("student_id, status, enrolled_at")
+        .eq("course_id", course_id).eq("student_id", student_id).limit(1).execute().data or [],
+        [],
+    )
+    if not enrolled:
+        raise HTTPException(status_code=404, detail="Student not found in this course")
+
+    rows = _safe(
+        lambda: sb.table("events")
+        .select("event_type, topic, session_id, payload, created_at")
+        .eq("course_id", course_id).eq("user_id", student_id)
+        .in_("event_type", ["mastery.updated", "misconception.detected",
+                            "turn.completed", "assessment.submitted"])
+        .order("created_at", desc=True).limit(5000).execute().data or [],
+        [],
+    )
+
+    from app.core.mastery import for_student
+    from app.core.tutor_insights import student_timeline as build
+
+    return {
+        "student": _people(sb, [student_id])[student_id],
+        "profile": _profile(sb, course_id, student_id, enrolled[0]),
+        "mastery": for_student(student_id, course_id),
+        "timeline": build(rows),
+    }
+
+
+def _profile(sb, course_id: str, student_id: str, enrolment: dict) -> dict:
+    """Who the student is and how far they have got — useful most of all for a
+    student with no timeline yet, who would otherwise show as a blank."""
+    user = (_safe(
+        lambda: sb.table("users").select("email, university_name, region, country, created_at")
+        .eq("id", student_id).limit(1).execute().data or [{}],
+        [{}],
+    ) or [{}])[0]
+    sessions = _safe(
+        lambda: sb.table("sessions").select("started_at")
+        .eq("course_id", course_id).eq("user_id", student_id)
+        .order("started_at", desc=True).execute().data or [],
+        [],
+    )
+    return {
+        "email": user.get("email"),
+        "university": user.get("university_name"),
+        "location": ", ".join(x for x in (user.get("region"), user.get("country")) if x) or None,
+        "joined_meraki": user.get("created_at"),
+        "enrolment_status": enrolment.get("status"),
+        "enrolled_at": enrolment.get("enrolled_at"),
+        "sessions": len(sessions),
+        "last_session_at": sessions[0]["started_at"] if sessions else None,
+    }
 
 
 @router.get("/knowledge-usage")

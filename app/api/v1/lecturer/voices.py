@@ -31,7 +31,7 @@ from app.media.voices import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/voices", tags=["Lecturer – Voices"])
+router = APIRouter(prefix="/voices", tags=["Instructor – Voices"])
 
 # What the preview reads back. Deliberately pedagogical rather than "testing,
 # one two three": a lecturer judging their own clone needs to hear it say the
@@ -149,7 +149,7 @@ async def create_voice(
         provider_voice_id = create_cloned_voice(
             name=f"{name.strip()[:60]} ({user['id'][:8]})",
             samples=[(sample.filename or "recording.webm", content)],
-            description=f"Meraki lecturer voice for {user.get('email', user['id'])}",
+            description=f"Meraki instructor voice for {user.get('email', user['id'])}",
         )
     except VoiceCloneError as exc:
         # The row is KEPT, marked failed. A lecturer who recorded for a minute
@@ -230,7 +230,7 @@ def delete_voice(voice_id: str, request: Request, user=Depends(lecturer_guard)):
 # checks sit next to each other and cannot drift apart.
 
 course_voice_router = APIRouter(
-    prefix="/courses/{course_id}/voice", tags=["Lecturer – Voices"]
+    prefix="/courses/{course_id}/voice", tags=["Instructor – Voices"]
 )
 
 

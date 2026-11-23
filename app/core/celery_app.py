@@ -150,6 +150,7 @@ celery_app.conf.update(
         "app.ai.tasks.process_mode_session_start_task": {"queue": "text_tasks"},
         "app.ai.tasks.process_mode_session_turn_task":  {"queue": "text_tasks"},
         "app.ai.tasks.process_ingestion_task":          {"queue": "ingestion_tasks"},
+        "app.ai.tasks.process_video_ingestion_task":    {"queue": "ingestion_tasks"},
         # No static route: the queue depends on the ASSET's renderer, so every
         # dispatch passes queue= explicitly (routing.render_queue()). A static
         # entry here would silently override that for .delay() callers.

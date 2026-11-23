@@ -5,7 +5,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from app.core import events
-from . import crag
+from . import crag, help_ladder
 from .retriever import retrieve
 from .prompt_builder import build_system_and_user
 from .claude import generate_response, stream_response
@@ -16,37 +16,6 @@ logger = logging.getLogger(__name__)
 # token: retrieval, re-ranking and any corrective retry. Beyond this the answer
 # is built from whatever retrieval has already produced.
 RETRIEVAL_DEADLINE = float(os.getenv("RAG_RETRIEVAL_DEADLINE_MS", "5000")) / 1000
-
-_NO_REFERENCE_SENTENCE = (
-    "I don't have specific reference material from your course notes for this "
-    "answer. Please ask your lecturer whether this topic is examinable."
-)
-
-
-def _ensure_failure_disclaimer(raw_output: str, *, board: bool, concise: bool) -> tuple[str, str]:
-    """Deterministically add the retrieval-failure notice Claude may omit.
-
-    The prompt still asks for an honest admission because it produces a more
-    natural transition.  This guard is the safety property: an ungrounded
-    answer must never look as if it came from the lecturer's material merely
-    because the model ignored that instruction.
-
-    Returns the corrected output and the exact suffix, if any, so streaming
-    callers can publish the deterministic addition to the connected client.
-    """
-    if "reference material" in raw_output.lower():
-        return raw_output, ""
-
-    if board and not concise:
-        suffix = (
-            "\n\n::: slide Course material note\n"
-            f"{_NO_REFERENCE_SENTENCE}\n"
-            ":::"
-        )
-    else:
-        suffix = f"\n\n{_NO_REFERENCE_SENTENCE}"
-    return f"{raw_output.rstrip()}{suffix}", suffix
-
 
 async def query_rag(
     user_message: str,
@@ -63,6 +32,7 @@ async def query_rag(
     board: bool = False,
     images: Optional[List[Dict[str, str]]] = None,
     academic_level: Optional[str] = None,
+    previous_help: Optional[int] = None,
 ) -> Union[Dict[str, Any], Dict[str, str]]:
     """Full RAG pipeline for a single conversational turn.
 
@@ -181,13 +151,14 @@ async def query_rag(
             payload={"best": verdict.best_score, "usable": verdict.usable},
         )
 
-    # Only when the board is in play — a text or video answer has nowhere to
-    # put a video slide, so the lookup would be wasted work.
-    video_concepts: List[str] = []
-    if board:
-        from app.media.render.service import approved_concept_keys
+    # Every Learn answer the student reads can carry the lecturer's approved
+    # animations — board or plain text. Only a spoken avatar answer (concise)
+    # has nowhere to show one, so the lookup would be wasted work there.
+    video_concepts: list = []
+    if board or (mode == "learn" and not concise):
+        from app.media.render.service import approved_concepts
 
-        video_concepts = await asyncio.to_thread(approved_concept_keys, course_id)
+        video_concepts = await asyncio.to_thread(approved_concepts, course_id)
 
     system_text, user_text = build_system_and_user(
         user_message=user_message,
@@ -202,6 +173,7 @@ async def query_rag(
         video_concepts=video_concepts,
         academic_level=academic_level,
         insufficient_context=crag._enabled() and verdict.should_admit_failure,
+        previous_help=previous_help,
     )
 
     if on_progress is not None:
@@ -219,24 +191,29 @@ async def query_rag(
     ]
 
     if on_chunk is not None:
+        # The help tag opens the answer and must never reach the student.
+        tag_filter = help_ladder.TagFilter(on_chunk)
         raw_output = await stream_response(
             prompt=user_text, mode=mode, system_parts=system_parts,
-            on_chunk=on_chunk, images=images,
+            on_chunk=tag_filter, images=images,
         )
+        tag_filter.flush()
     else:
         raw_output = await generate_response(
             prompt=user_text, mode=mode, system_parts=system_parts, images=images,
         )
 
-    if verdict.should_admit_failure:
-        raw_output, suffix = _ensure_failure_disclaimer(
-            raw_output, board=board, concise=concise
-        )
-        if suffix and on_chunk is not None:
-            on_chunk(suffix)
+    help_level, help_asked, raw_output = help_ladder.parse(raw_output)
+
+    # No appended "course material note": the client asked for it to go. The
+    # weak-retrieval directive (crag.INSUFFICIENT_CONTEXT_DIRECTIVE) still has
+    # the model say so in its own words when the notes do not cover a question.
 
     return {
         "mode": mode,
         "response": raw_output.strip(),
         "sources": sources,
+        # None when the model sent no tag (non-Learn modes, or it forgot).
+        "help_level": help_level,
+        "help_asked": help_asked,
     }

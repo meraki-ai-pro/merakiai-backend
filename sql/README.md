@@ -29,6 +29,19 @@ set is safe.
 | 013 | roster_import_narration_and_upload_tags | `enrolment_invitations`, `documents.question_formats`, narration/revision columns on `media_assets`, `courses.subject` |
 | 014 | lecturer_voices | `lecturer_voices`, `courses.lecturer_voice_id` |
 | 015 | pptx knowledge uploads | `storage.buckets.allowed_mime_types` for `course-documents` |
+| 016 | UDL round | `sessions.title`, `users.deleted_at`, exam columns on `assessments*`, `assessment_starts`, `enrolments.extra_time_percent`, `media_assets.beats` |
+| 017 | targeted_assessments | `assessments.target_student_ids` (Intervention Studio: papers for chosen students) |
+| 018 | session_pin_archive | `sessions.pinned_at`, `sessions.archived_at` (pin and archive in the sidebar) |
+| 019 | security_advisor_hardening | Revokes REST access to server-only SECURITY DEFINER functions (invitation acceptance was exploitable), pins search_path |
+| 020 | private_helpers_and_extensions | RLS helpers → `private` schema, pgvector → `extensions`, server-only `redeem_invite_code_for` |
+| 021 | drop_client_redeem_invite_code | Drops the old client-callable `redeem_invite_code` — **only after the backend using 020 is deployed** |
+| 022 | extra_time_minutes | `enrolments.extra_time_minutes` (exam accommodations in minutes; `extra_time_percent` is no longer read) |
+| 023 | course_video_sources | `course-videos` bucket, `documents.media_url` (lecture videos, uploaded or linked, as course sources) |
+| 024 | drop_extra_time_percent | Drops `enrolments.extra_time_percent` — **only after the backend using 022 is deployed** |
+| 025 | assignments_and_exam_integrity | `student_assignments` (Intervention Studio activities, optionally required), `assessment_starts.integrity_events` |
+| 026 | instructor_not_a_student | Trigger refusing an enrolment by the course's own instructor; removes any that exist |
+| 027 | exam_pass_mark | `assessments.pass_mark` (instructor-set pass mark; NULL = 50%) |
+| 028 | durable_course_engagement | `enrolments.first_started_at`, `last_activity_at`, and a trigger that preserves course-started status after session deletion |
 
 ## Dependencies worth knowing
 
@@ -49,6 +62,26 @@ columns to `documents` and `media_assets`.
 
 **014 after 003 and 004.** Its policies call `is_admin()` and its trigger uses
 `touch_updated_at()`.
+
+**016 after 004, 008 and 010.** It alters `enrolments`, `media_assets` and the assessment tables.
+
+**017 after 010.** One nullable column on `assessments`; NULL keeps every existing paper course-wide.
+
+**018 after 016.** Two nullable timestamps on `sessions`; NULL keeps every existing session unpinned and visible.
+
+**020 moves the RLS helpers to `private`.** Policies follow by OID, so nothing
+breaks, but any policy written after 020 must call `private.is_admin()` (and
+`private.owns_course()`, etc.), not `public.…`. Re-running 003/004 would
+recreate unused public copies.
+
+**024 waits for a deploy.** The previous backend selects `extra_time_percent`.
+
+**028 after 004 and 010.** It extends `enrolments`, backfills from `sessions`
+and retained `events`, then records the first session start independently of
+the student's deletable chat history.
+
+**021 waits for a deploy.** The previous backend calls `redeem_invite_code`
+with the student's JWT; dropping it first breaks "Join with an invite code".
 
 **003 redefines `is_admin()` deliberately.** It is referenced by roughly thirty
 RLS policies. If the existing definition happened to be `role <> 'user'` rather
