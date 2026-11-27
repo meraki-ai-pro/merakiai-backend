@@ -206,6 +206,18 @@ if ! sudo -u "$APP_USER" git -C "$APP_DIR" merge-base --is-ancestor \
   exit 65
 fi
 
+if [[ -n "$render_compose_file" ]]; then
+  # Renderer images contain Chromium and TeX, so retaining caches and images
+  # from every release eventually fills the instance disk. Docker preserves
+  # anything referenced by a running container; only reproducible, unused
+  # data is removed here before the next pair of images is unpacked.
+  echo "--- Reclaim unused Docker storage ---"
+  docker builder prune --all --force >/dev/null
+  docker image prune --all --force >/dev/null
+  df -h /var/lib/docker | tail -n 1
+  echo "--- Reclaim unused Docker storage complete ---"
+fi
+
 sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$commit_sha"
 switched=1
 run_logged "Install locked dependencies" \
