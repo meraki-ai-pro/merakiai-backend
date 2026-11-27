@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import unicodedata
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -65,34 +66,36 @@ def _norm(s: str) -> str:
     return " ".join(s.split())
 
 
-# Six consecutive words the student typed, appearing in what would be spoken,
-# is an echo. Short enough to catch a phrase split across "sentences" or
-# dressed in markdown; long enough that an answer reusing the question's words
-# ("what does a collector do") is not caught.
+# A run of words the student typed, appearing in what would be spoken, is an
+# echo. The run is six words, or the whole input when it is shorter, down to
+# three: below that every answer repeats its question ("what is a collector").
 _ECHO_WINDOW = 6
+_ECHO_MIN_WINDOW = 3
 
 
 def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.casefold())
+    # Unicode-aware, so non-Latin text is compared rather than dropped.
+    return re.findall(r"\w+", unicodedata.normalize("NFKC", text).casefold())
+
+
+def _windows(words: list[str], size: int) -> set[tuple[str, ...]]:
+    return {tuple(words[i:i + size]) for i in range(len(words) - size + 1)}
 
 
 def echoes_student(source: str, student_inputs: list[str]) -> bool:
     """True when the spoken form of ``source`` repeats a run of words the
     student typed ("repeat after me: ..."), which would otherwise pass as
-    tutor content. Compared on the exact text that would be synthesised."""
+    tutor content. Both sides go through the same spoken-text conversion, so
+    markdown and maths notation cannot make them differ."""
     spoken = _words(spoken_answer(source))
-    typed_windows = set()
-    for t in student_inputs:
-        w = _words(t or "")
-        typed_windows.update(
-            tuple(w[i:i + _ECHO_WINDOW]) for i in range(len(w) - _ECHO_WINDOW + 1)
-        )
-    if not typed_windows:
-        return False
-    return any(
-        tuple(spoken[i:i + _ECHO_WINDOW]) in typed_windows
-        for i in range(len(spoken) - _ECHO_WINDOW + 1)
-    )
+    for typed in student_inputs:
+        words = _words(spoken_answer(typed or ""))
+        size = min(_ECHO_WINDOW, len(words))
+        if size < _ECHO_MIN_WINDOW:
+            continue
+        if _windows(spoken, size) & _windows(words, size):
+            return True
+    return False
 
 
 def source_is_tutor_text(source: str, tutor_responses: list[str]) -> bool:
