@@ -42,6 +42,7 @@ set is safe.
 | 026 | instructor_not_a_student | Trigger refusing an enrolment by the course's own instructor; removes any that exist |
 | 027 | exam_pass_mark | `assessments.pass_mark` (instructor-set pass mark; NULL = 50%) |
 | 028 | durable_course_engagement | `enrolments.first_started_at`, `last_activity_at`, and a trigger that preserves course-started status after session deletion |
+| 029 | exam_integrity_reviews | Instructor integrity decisions, deductions and release-gated student feedback (required by exam results endpoints) |
 
 ## Dependencies worth knowing
 

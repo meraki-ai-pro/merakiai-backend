@@ -272,3 +272,103 @@ class TestExamResultsExport:
         assert len(wb.sheetnames) == 3 and len(set(wb.sheetnames)) == 3
         ws = wb[wb.sheetnames[1]]
         assert [c.value for c in ws[2]][:5] == ["Ama", "a@x", 2, 3, 5]
+
+
+class TestIntegrityReview:
+    def test_adjustment_keeps_question_marks_and_clamps_total(self):
+        class Query:
+            def select(self, *_): return self
+            def eq(self, *_): return self
+            def execute(self):
+                return type("Result", (), {"data": [{"student_id": "s", "deduction": 5,
+                    "integrity_status": "confirmed", "feedback": "Unauthorised notes"}]})()
+        sb = type("DB", (), {"table": lambda self, _: Query()})()
+        rows = {"s": {"score": 3, "by_question": {"q": 3}}}
+        exams.apply_integrity_reviews(sb, "exam", rows)
+        assert rows["s"]["score"] == 0
+        assert rows["s"]["raw_score"] == 3
+        assert rows["s"]["by_question"] == {"q": 3}
+        assert rows["s"]["integrity_feedback"] == "Unauthorised notes"
+
+    def test_released_results_cannot_be_penalised(self, monkeypatch):
+        from fastapi import HTTPException
+        monkeypatch.setattr(exams, "_load_owned", lambda *_: {"results_released": True})
+        with pytest.raises(HTTPException) as exc:
+            exams.review_integrity("e", "s", exams.IntegrityReview(
+                integrity_status="confirmed", deduction=1, feedback="Reason"), None, {"id": "teacher"})
+        assert exc.value.status_code == 409
+
+    def test_concern_alone_cannot_deduct_marks(self, monkeypatch):
+        from fastapi import HTTPException
+        monkeypatch.setattr(exams, "_load_owned", lambda *_: {})
+        with pytest.raises(HTTPException) as exc:
+            exams.review_integrity("e", "s", exams.IntegrityReview(
+                integrity_status="concern", deduction=1, feedback="Reason"), None, {"id": "teacher"})
+        assert exc.value.status_code == 400
+
+    def test_feedback_is_hidden_until_release(self, monkeypatch):
+        monkeypatch.setattr(exams, "_load_published_for_student", lambda *_: {"results_released": False})
+        monkeypatch.setattr(exams, "get_supabase", lambda: pytest.fail("Must not query unreleased feedback"))
+        assert exams.my_result("e", {"id": "s"}) == {"released": False}
+
+    def test_non_finite_deduction_rejected(self):
+        for value in (float("nan"), float("inf"), -1):
+            with pytest.raises(ValidationError):
+                exams.IntegrityReview(integrity_status="confirmed", deduction=value, feedback="Reason")
+
+    def test_reuse_resets_schedule_audience_and_results(self, monkeypatch):
+        source = {"id": "old", "course_id": "c", "kind": "test", "title": "Exam",
+                  "is_published": True, "results_released": True, "target_student_ids": ["s"],
+                  "opens_at": "2026-01-01", "closes_at": "2026-01-02", "time_limit_minutes": 60}
+        monkeypatch.setattr(exams, "_load_owned", lambda *_: source)
+        saved = {}
+        def create(payload, *_):
+            saved.update(payload.model_dump())
+            return {"assessment": {"id": "new"}}
+        monkeypatch.setattr(exams, "create_assessment", create)
+        inserted = []
+        class Query:
+            def select(self, *_): return self
+            def eq(self, *_): return self
+            def insert(self, rows): inserted.extend(rows); return self
+            def execute(self):
+                return type("R", (), {"data": [{"id": "q", "assessment_id": "old", "prompt": "Question", "points": 2}]})()
+        monkeypatch.setattr(exams, "get_supabase", lambda: type("DB", (), {"table": lambda self, _: Query()})())
+        assert exams.reuse_assessment("old", None, {"id": "t"})["assessment"]["id"] == "new"
+        assert saved["opens_at"] is None and saved["target_student_ids"] is None
+        assert saved["time_limit_minutes"] == 60
+        assert inserted == [{"assessment_id": "new", "prompt": "Question", "points": 2}]
+
+
+class TestLatestStart:
+    PAPER = {"time_limit_minutes": 120, "closes_at": "2026-11-27T14:00:00Z"}
+
+    def test_each_student_has_their_own_full_countdown(self):
+        a = datetime(2026, 11, 27, 10, 15, tzinfo=timezone.utc)
+        b = datetime(2026, 11, 27, 12, 0, tzinfo=timezone.utc)
+        exams.check_start_allowed(self.PAPER, a, 0, None)
+        exams.check_start_allowed(self.PAPER, b, 0, None)
+        assert deadline_for(a, 120, 0).hour == 12
+        assert deadline_for(a, 120, 0).minute == 15
+        assert deadline_for(b, 120, 0).hour == 14
+
+    def test_no_admission_after_latest_start(self):
+        from fastapi import HTTPException
+        cutoff = exams.latest_start_for(self.PAPER)
+        assert cutoff == datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+        with pytest.raises(HTTPException) as error:
+            exams.check_start_allowed(self.PAPER, cutoff + timedelta(microseconds=1), 0, None)
+        assert error.value.status_code == 403
+
+    def test_resume_after_cutoff_preserves_original_deadline(self):
+        started = datetime(2026, 11, 27, 10, 15, tzinfo=timezone.utc)
+        now = datetime(2026, 11, 27, 12, 5, tzinfo=timezone.utc)
+        exams.check_start_allowed(self.PAPER, now, 0, started)
+        assert deadline_for(started, 120, 0) == datetime(2026, 11, 27, 12, 15, tzinfo=timezone.utc)
+
+    def test_accommodations_require_earlier_admission(self):
+        assert exams.latest_start_for(self.PAPER, 30) == datetime(2026, 11, 27, 11, 30, tzinfo=timezone.utc)
+
+    def test_no_cutoff_for_untimed_or_open_ended_papers(self):
+        assert exams.latest_start_for({"closes_at": self.PAPER["closes_at"]}) is None
+        assert exams.latest_start_for({"time_limit_minutes": 120}) is None

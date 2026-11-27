@@ -49,3 +49,19 @@ def test_soft_deleted_students_are_left_out():
     people = {"a": {"deleted_at": None}, "b": {"deleted_at": "2026-10-01T00:00:00Z"}}
     rows = [{"student_id": "a"}, {"student_id": "b"}, {"student_id": "unknown"}]
     assert _live(rows, "student_id", people) == [{"student_id": "a"}, {"student_id": "unknown"}]
+
+
+def test_guide_identity_order_dates_units_and_long_text():
+    from app.api.v1.lecturer.data_center import format_dataset
+    header, rows = format_dataset("feedback", ["email", "name", "student_id", "comment", "at", "nps"],
+        [["ama@example.com", "Ama", "s1", "Good", "2026-11-01T15:00:00+02:00", 8]])
+    assert header[:3] == ["Student ID", "Student name", "Email"]
+    assert header[-1] == "Comment"
+    assert rows[0][header.index("Given at (UTC)")] == "2026-11-01 13:00"
+    assert rows[0][header.index("Recommendation score (0 to 10)")] == 8
+
+
+def test_mastery_levels_match_dashboard():
+    from app.api.v1.lecturer.data_center import format_dataset
+    header, rows = format_dataset("mastery", ["student_id", "mastery_percent"], [["a", 70], ["b", 40], ["c", 39]])
+    assert [r[header.index("Level")] for r in rows] == ["Secure", "Developing", "Struggling"]

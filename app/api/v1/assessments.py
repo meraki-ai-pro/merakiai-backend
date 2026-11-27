@@ -154,6 +154,12 @@ class MarkUpdate(BaseModel):
     feedback: str | None = Field(None, max_length=2000)
 
 
+class IntegrityReview(BaseModel):
+    integrity_status: Literal["clear", "concern", "confirmed"]
+    deduction: float = Field(0, ge=0, le=30000, allow_inf_nan=False)
+    feedback: str = Field(..., min_length=1, max_length=2000)
+
+
 class ExtraTimeUpdate(BaseModel):
     extra_time_minutes: int = Field(..., ge=0, le=600)
 
@@ -226,6 +232,24 @@ def effective_minutes(time_limit_minutes: int | None, extra_time_minutes: int) -
 def deadline_for(started_at: datetime, time_limit_minutes: int | None, extra_time_minutes: int) -> datetime | None:
     minutes = effective_minutes(time_limit_minutes, extra_time_minutes)
     return started_at + timedelta(minutes=minutes) if minutes else None
+
+
+def latest_start_for(assessment: dict, extra_time_minutes: int = 0) -> datetime | None:
+    """Last admission that leaves the student's full allowance before closing."""
+    closes = _ts(assessment.get("closes_at"))
+    minutes = effective_minutes(assessment.get("time_limit_minutes"), extra_time_minutes)
+    return closes - timedelta(minutes=minutes) if closes and minutes else None
+
+
+def check_start_allowed(assessment: dict, now: datetime, extra_time_minutes: int,
+                        started_at: datetime | None) -> None:
+    # Admission applies only to a new sitting. Resuming never starts a new clock.
+    latest = latest_start_for(assessment, extra_time_minutes)
+    if started_at is None and latest is not None and now > latest:
+        raise HTTPException(status_code=403, detail=(
+            f"The latest start time was {latest.strftime('%Y-%m-%d %H:%M')} UTC. "
+            "There is not enough time left for your full exam duration."
+        ))
 
 
 def coerce_imported_question(raw: Any) -> dict | None:
@@ -733,6 +757,65 @@ async def import_questions(
 
 # ── Lecturer: marking, results, release ─────────────────────────────────────
 
+@router.post("/{assessment_id}/reuse")
+def reuse_assessment(assessment_id: str, request: Request, user=Depends(lecturer_guard)):
+    """Copy the paper into a new draft; never copy sittings, audiences or results."""
+    source = _load_owned(assessment_id, user)
+    if source["kind"] not in EXAM_KINDS:
+        raise HTTPException(status_code=400, detail="Only exams can be reused.")
+    payload = AssessmentCreate(**{k: source[k] for k in (
+        "course_id", "kind", "instructions", "time_limit_minutes", "pass_mark"
+    ) if k in source}, title=(source["title"][:190] + " (copy)"))
+    created = create_assessment(payload, request, user)["assessment"]
+    sb = get_supabase()
+    try:
+        questions = sb.table("assessment_questions").select("*").eq("assessment_id", assessment_id).execute().data or []
+        fields = ("question_type", "prompt", "options", "correct_answer", "topic", "points", "order_index")
+        if questions:
+            sb.table("assessment_questions").insert([
+                {"assessment_id": created["id"], **{k: q[k] for k in fields if k in q}} for q in questions
+            ]).execute()
+    except Exception:
+        sb.table("assessments").delete().eq("id", created["id"]).execute()
+        raise
+    return {"assessment": created}
+
+
+@router.patch("/{assessment_id}/students/{student_id}/integrity-review")
+def review_integrity(assessment_id: str, student_id: str, payload: IntegrityReview,
+                     request: Request, user=Depends(lecturer_guard)):
+    paper = _load_owned(assessment_id, user)
+    if paper.get("results_released"):
+        raise HTTPException(status_code=409, detail="Integrity decisions must be saved before results are released.")
+    if payload.deduction and payload.integrity_status != "confirmed":
+        raise HTTPException(status_code=400, detail="Confirm the integrity breach before deducting marks.")
+    if not payload.feedback.strip():
+        raise HTTPException(status_code=400, detail="Explain your integrity decision to the student.")
+    sb = get_supabase()
+    attempts = sb.table("assessment_attempts").select("score").eq("assessment_id", assessment_id).eq("student_id", student_id).execute().data or []
+    if not attempts:
+        raise HTTPException(status_code=404, detail="Student submission not found.")
+    if payload.deduction > sum(float(a.get("score") or 0) for a in attempts):
+        raise HTTPException(status_code=400, detail="Deduction cannot exceed the student's earned marks.")
+    update = {**payload.model_dump(), "feedback": payload.feedback.strip(), "reviewed_by": user["id"], "reviewed_at": _now().isoformat()}
+    sb.table("assessment_integrity_reviews").upsert({"assessment_id": assessment_id, "student_id": student_id, **update}, on_conflict="assessment_id,student_id").execute()
+    audit.record(actor=user, action="assessment.integrity_review", resource_type="assessment",
+                 resource_id=assessment_id, course_id=paper["course_id"], new_values=update, request=request)
+    return {"status": "ok"}
+
+
+def apply_integrity_reviews(sb, assessment_id: str, by_student: dict) -> None:
+    reviews = sb.table("assessment_integrity_reviews").select("*").eq("assessment_id", assessment_id).execute().data or []
+    for review in reviews:
+        row = by_student.get(review["student_id"])
+        if row is not None:
+            row["raw_score"] = row["score"]
+            row["deduction"] = min(float(review["deduction"]), row["score"])
+            row["score"] = max(0, row["score"] - row["deduction"])
+            row["integrity_status"] = review["integrity_status"]
+            row["integrity_feedback"] = review["feedback"]
+
+
 @router.get("/{assessment_id}/results")
 def results(assessment_id: str, user=Depends(lecturer_guard)):
     """Per-student totals, with who still has answers awaiting review."""
@@ -746,6 +829,7 @@ def results(assessment_id: str, user=Depends(lecturer_guard)):
         "assessment_id", assessment_id
     ).execute().data or []
     total_points, by_student = tally(questions, attempts)
+    apply_integrity_reviews(sb, assessment_id, by_student)
     try:
         integrity = {
             r["student_id"]: integrity_summary(r.get("integrity_events"))
@@ -772,6 +856,7 @@ def results(assessment_id: str, user=Depends(lecturer_guard)):
                 "percent": round(100 * row["score"] / total_points, 1),
                 "pending_review": row["pending"],
                 "integrity": integrity.get(sid, {}),
+                **{k: row.get(k) for k in ("raw_score", "deduction", "integrity_status", "integrity_feedback")},
             }
             for sid, row in sorted(by_student.items(), key=lambda x: -x[1]["score"])
         ],
@@ -850,6 +935,7 @@ def _course_exam_data(course_id: str) -> list[dict]:
     for p in papers:
         qs = sorted((q for q in questions if q["assessment_id"] == p["id"]), key=lambda q: q["order_index"] or 0)
         total, by_student = tally(qs, [a for a in attempts if a["assessment_id"] == p["id"]])
+        apply_integrity_reviews(sb, p["id"], by_student)
         out.append({"paper": p, "questions": qs, "total_points": total, "by_student": by_student})
     return out
 
@@ -920,7 +1006,7 @@ def build_results_workbook(course_name: str, exams: list[dict], names: dict[str,
         used.add(title)
         ws = wb.create_sheet(title)
         q_cols = [f"Q{n} ({float(q['points']):g})" for n, q in enumerate(d["questions"], 1)]
-        ws.append(["Student", "Email", *q_cols, "Total", "Out of", "%", "Awaiting review", "Submitted"])
+        ws.append(["Student", "Email", *q_cols, "Total", "Out of", "%", "Awaiting review", "Submitted (UTC)", "Raw score", "Deduction", "Integrity status", "Integrity feedback"])
         for cell in ws[1]:
             cell.font = bold
         for sid, r in sorted(d["by_student"].items(), key=lambda x: -x[1]["score"]):
@@ -930,6 +1016,7 @@ def build_results_workbook(course_name: str, exams: list[dict], names: dict[str,
                 *[r["by_question"].get(q["id"]) for q in d["questions"]],
                 r["score"], d["total_points"], round(100 * r["score"] / d["total_points"], 1),
                 r["pending"], (r["submitted_at"] or "")[:16].replace("T", " "),
+                r.get("raw_score", r["score"]), r.get("deduction", 0), r.get("integrity_status", "Not reviewed"), r.get("integrity_feedback", ""),
             ])
         ws.freeze_panes = "C2"
         for col in range(1, ws.max_column + 1):
@@ -938,6 +1025,12 @@ def build_results_workbook(course_name: str, exams: list[dict], names: dict[str,
     summary.column_dimensions["A"].width = 34
     for col in range(2, len(header) + 1):
         summary.column_dimensions[get_column_letter(col)].width = 14
+    from app.api.v1.lecturer.data_center import safe_cell
+    for sheet in wb:
+        for cells in sheet:
+            for cell in cells:
+                if isinstance(cell.value, str):
+                    cell.value = safe_cell(cell.value)
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -1204,6 +1297,9 @@ def available(course_id: str, user=Depends(auth_guard)):
     for q in sb.table("assessment_questions").select("assessment_id").in_("assessment_id", ids).execute().data or []:
         counts[q["assessment_id"]] = counts.get(q["assessment_id"], 0) + 1
     extra = _extra_time(course_id, user["id"])
+    starts = {r["assessment_id"]: r["started_at"] for r in
+              sb.table("assessment_starts").select("assessment_id, started_at")
+              .eq("student_id", user["id"]).in_("assessment_id", ids).execute().data or []}
 
     return {
         "extra_time_minutes": extra,
@@ -1214,6 +1310,8 @@ def available(course_id: str, user=Depends(auth_guard)):
                 "question_count": counts.get(r["id"], 0),
                 "time_limit_minutes": r.get("time_limit_minutes"),
                 "your_time_minutes": effective_minutes(r.get("time_limit_minutes"), extra),
+                "latest_start_at": latest_start_for(r, extra).isoformat() if latest_start_for(r, extra) else None,
+                "started_at": starts.get(r["id"]),
                 "opens_at": r.get("opens_at"),
                 "closes_at": r.get("closes_at"),
                 "completed": r["id"] in done,
@@ -1241,10 +1339,18 @@ def take(assessment_id: str, user=Depends(auth_guard)):
     if already:
         raise HTTPException(status_code=409, detail="You have already submitted this paper.")
 
+    existing = sb.table("assessment_starts").select("started_at").eq(
+        "assessment_id", assessment_id
+    ).eq("student_id", user["id"]).execute().data or []
+    admitted_at = _now()
+    extra = _extra_time(assessment["course_id"], user["id"])
+    check_start_allowed(assessment, admitted_at, extra,
+                        _ts(existing[0]["started_at"]) if existing else None)
+
     # Every sitting gets a server-side start row. Previously only timed papers
     # did, so integrity events for untimed exams were silently ignored.
     sb.table("assessment_starts").upsert(
-        {"assessment_id": assessment_id, "student_id": user["id"]},
+        {"assessment_id": assessment_id, "student_id": user["id"], "started_at": admitted_at.isoformat()},
         on_conflict="assessment_id,student_id", ignore_duplicates=True,
     ).execute()
     start = sb.table("assessment_starts").select("started_at").eq(
@@ -1255,7 +1361,7 @@ def take(assessment_id: str, user=Depends(auth_guard)):
     limit = assessment.get("time_limit_minutes")
     if limit:
         started_at = _ts(start[0]["started_at"]) if start else _now()
-        deadline = deadline_for(started_at, limit, _extra_time(assessment["course_id"], user["id"]))
+        deadline = deadline_for(started_at, limit, extra)
         closes = _ts(assessment.get("closes_at"))
         if closes and deadline > closes:
             deadline = closes  # the window closing ends the paper for everyone
@@ -1463,7 +1569,13 @@ def my_result(assessment_id: str, user=Depends(auth_guard)):
     total = sum(float(q["points"]) for q in questions) or 1.0
     earned = sum(float(a.get("score") or 0) for a in attempts.values())
 
+    reviewed = {user["id"]: {"score": earned}}
+    apply_integrity_reviews(sb, assessment_id, reviewed)
+    decision = reviewed[user["id"]]
+    earned = decision["score"]
+
     return {
+        **{k: decision.get(k) for k in ("raw_score", "deduction", "integrity_status", "integrity_feedback")},
         "released": True,
         "title": assessment["title"],
         "score": earned,

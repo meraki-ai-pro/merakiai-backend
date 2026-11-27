@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable, Literal
 
@@ -104,8 +105,8 @@ def _students(sb, course_id, lo, hi):
                   .eq("course_id", course_id), "enrolled_at", lo, hi)
     people = _people(sb, {r["student_id"] for r in rows})
     rows = _live(rows, "student_id", people)
-    return (["email", "name", "status", "enrolled_at", "completed_at", "withdrawn_at", "extra_time_minutes"],
-            [[people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r["status"],
+    return (["student_id", "email", "name", "status", "enrolled_at", "completed_at", "withdrawn_at", "extra_time_minutes"],
+            [[r["student_id"], people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r["status"],
               r.get("enrolled_at"), r.get("completed_at"), r.get("withdrawn_at"), r.get("extra_time_minutes")] for r in rows])
 
 
@@ -114,23 +115,32 @@ def _sessions(sb, course_id, lo, hi):
                   .eq("course_id", course_id), "started_at", lo, hi)
     people = _people(sb, {r["user_id"] for r in rows})
     rows = _live(rows, "user_id", people)
-    return (["session_id", "email", "name", "title", "mode", "format", "started_at", "archived"],
-            [[r["id"], people.get(r["user_id"], {}).get("email"), _name(people.get(r["user_id"])), r.get("title"),
+    from app.api.v1.lecturer.analytics import _session_turns, BREAK_MINUTES
+    turns = _session_turns(sb, [r["id"] for r in rows])
+    metrics = {}
+    for r in rows:
+        ts = turns.get(r["id"], [])
+        metrics[r["id"]] = [ts[-1].isoformat() if ts else r.get("started_at"), len(ts),
+            round(sum(min((b - a).total_seconds() / 60, BREAK_MINUTES) for a, b in zip(ts, ts[1:])), 1) if len(ts) > 1 else None]
+    return (["session_id", "student_id", "email", "name", "title", "mode", "format", "started_at", "archived", "last_activity_at", "questions_asked", "time_on_task"],
+            [[r["id"], r["user_id"], people.get(r["user_id"], {}).get("email"), _name(people.get(r["user_id"])), r.get("title"),
               r.get("current_mode"), "video" if r.get("prefers_video") else "text", r.get("started_at"),
-              "yes" if r.get("archived_at") else "no"] for r in rows])
+              "yes" if r.get("archived_at") else "no", *metrics[r["id"]]] for r in rows])
 
 
 def _conversations(sb, course_id, lo, hi):
     sessions = _course_sessions(sb, course_id)
     rows = _in_batches(list(sessions), lambda b: _fetch(
-        lambda: sb.table("conversations").select("session_id, user_id, mode, user_input, tutor_response, response_format, created_at")
+        lambda: sb.table("conversations").select("session_id, user_id, mode, user_input, tutor_response, response_format, sources, created_at")
         .in_("session_id", b), "created_at", lo, hi))
+    rows = [r for r in rows if not str(r.get("user_input") or "").startswith("(system)")]
     rows.sort(key=lambda r: r.get("created_at") or "")
     people = _people(sb, {r["user_id"] for r in rows if r.get("user_id")})
     rows = _live(rows, "user_id", people)
-    return (["session_id", "session_title", "email", "name", "mode", "format", "asked_at", "student_message", "tutor_answer"],
-            [[r["session_id"], sessions.get(r["session_id"], {}).get("title"), people.get(r.get("user_id"), {}).get("email"),
+    return (["session_id", "session_title", "student_id", "email", "name", "mode", "format", "asked_at", "sources_cited", "student_message", "tutor_answer"],
+            [[r["session_id"], sessions.get(r["session_id"], {}).get("title"), r.get("user_id"), people.get(r.get("user_id"), {}).get("email"),
               _name(people.get(r.get("user_id"))), r.get("mode"), r.get("response_format"), r.get("created_at"),
+              "; ".join(str(x.get("title") or x.get("filename") or x.get("source") or "") if isinstance(x, dict) else str(x) for x in (r.get("sources") or [])),
               "" if str(r.get("user_input") or "").startswith("(system)") else r.get("user_input"),
               r.get("tutor_response")] for r in rows])
 
@@ -145,9 +155,9 @@ def _exam_results(sb, course_id, lo, hi):
     people = _people(sb, {r["student_id"] for r in rows})
     rows = _live(rows, "student_id", people)
     rows.sort(key=lambda r: (r.get("created_at") or "", questions.get(r["question_id"], {}).get("order_index") or 0))
-    return (["exam", "kind", "email", "name", "question_no", "question", "topic", "answer", "score", "out_of",
+    return (["exam", "kind", "student_id", "email", "name", "question_no", "question", "topic", "answer", "score", "out_of",
              "correct", "awaiting_review", "seconds_on_question", "submitted_at"],
-            [[papers[r["assessment_id"]]["title"], papers[r["assessment_id"]]["kind"],
+            [[papers[r["assessment_id"]]["title"], papers[r["assessment_id"]]["kind"], r["student_id"],
               people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])),
               (questions.get(r["question_id"], {}).get("order_index") or 0) + 1,
               questions.get(r["question_id"], {}).get("prompt"), questions.get(r["question_id"], {}).get("topic"),
@@ -161,8 +171,8 @@ def _mastery(sb, course_id, lo, hi):
                   .eq("course_id", course_id), "updated_at", lo, hi)
     people = _people(sb, {r["student_id"] for r in rows})
     rows = _live(rows, "student_id", people)
-    return (["email", "name", "topic", "mastery_percent", "attempts", "correct", "last_practised_at", "updated_at"],
-            [[people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r.get("topic"),
+    return (["student_id", "email", "name", "topic", "mastery_percent", "attempts", "correct", "last_practised_at", "updated_at"],
+            [[r["student_id"], people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r.get("topic"),
               round(float(r.get("mastery_score") or 0) * 100, 1), r.get("attempts_count"), r.get("correct_count"),
               r.get("last_practised_at"), r.get("updated_at")] for r in rows])
 
@@ -177,8 +187,8 @@ def _activities(sb, course_id, lo, hi):
         status.update({a["id"]: a["status"] for a in assignments.for_student(sid, course_id)})
     people = _people(sb, {r["student_id"] for r in rows})
     rows = _live(rows, "student_id", people)
-    return (["email", "name", "activity", "kind", "required", "status", "assigned_at"],
-            [[people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r["title"], r["kind"],
+    return (["student_id", "email", "name", "activity_id", "activity", "kind", "required", "status", "assigned_at"],
+            [[r["student_id"], people.get(r["student_id"], {}).get("email"), _name(people.get(r["student_id"])), r["id"], r["title"], r["kind"],
               "yes" if r["required"] else "no", status.get(r["id"], "not published"), r["created_at"]] for r in rows])
 
 
@@ -187,8 +197,8 @@ def _engagement(sb, course_id, lo, hi):
                   .eq("course_id", course_id), "created_at", lo, hi)
     people = _people(sb, {r["user_id"] for r in rows if r.get("user_id")})
     rows = _live(rows, "user_id", people)
-    return (["event", "email", "name", "topic", "session_id", "at"],
-            [[r["event_type"], people.get(r.get("user_id"), {}).get("email"), _name(people.get(r.get("user_id"))),
+    return (["event", "student_id", "email", "name", "topic", "session_id", "at"],
+            [[r["event_type"], r.get("user_id"), people.get(r.get("user_id"), {}).get("email"), _name(people.get(r.get("user_id"))),
               r.get("topic"), r.get("session_id"), r["created_at"]] for r in rows])
 
 
@@ -197,8 +207,8 @@ def _feedback(sb, course_id, lo, hi):
                   .eq("course_id", course_id), "created_at", lo, hi)
     people = _people(sb, {r["user_id"] for r in rows if r.get("user_id")})
     rows = _live(rows, "user_id", people)
-    return (["email", "name", "role", "type", "rating", "nps", "mode", "comment", "at"],
-            [[people.get(r.get("user_id"), {}).get("email"), _name(people.get(r.get("user_id"))), r.get("role_at_time"),
+    return (["student_id", "email", "name", "role", "type", "rating", "nps", "mode", "comment", "at"],
+            [[r.get("user_id"), people.get(r.get("user_id"), {}).get("email"), _name(people.get(r.get("user_id"))), r.get("role_at_time"),
               r.get("feedback_type"), r.get("rating"), r.get("nps_score"), r.get("mode"), r.get("free_text"),
               r["created_at"]] for r in rows])
 
@@ -208,6 +218,59 @@ DATASETS: dict[str, Callable] = {
     "exam_results": _exam_results, "mastery": _mastery, "activities": _activities,
     "engagement": _engagement, "feedback": _feedback,
 }
+
+
+_HEADERS = {
+    "last_activity_at": "Last activity (UTC)", "questions_asked": "Questions asked", "time_on_task": "Time on task (minutes)",
+    "activity_id": "Activity ID", "sources_cited": "Sources cited",
+    "student_id": "Student ID", "email": "Email", "name": "Student name",
+    "session_id": "Session ID", "title": "Session title", "mode": "Mode", "format": "Format",
+    "status": "Status", "enrolled_at": "Enrolled on (UTC)", "extra_time_minutes": "Extra time (minutes)",
+    "completed_at": "Completed on (UTC)", "withdrawn_at": "Withdrawn on (UTC)",
+    "started_at": "Started (UTC)", "asked_at": "Asked at (UTC)", "at": "Happened at (UTC)",
+    "updated_at": "Last updated (UTC)", "last_practised_at": "Last practised (UTC)",
+    "assigned_at": "Assigned on (UTC)", "submitted_at": "Submitted at (UTC)",
+    "student_message": "Student message", "tutor_answer": "Tutor answer", "comment": "Comment",
+    "mastery_percent": "Mastery (%)", "attempts": "Review answers counted", "correct": "Correct answers",
+    "required": "Required before other study", "kind": "Activity type", "activity": "Activity",
+    "nps": "Recommendation score (0 to 10)", "rating": "Rating", "event": "Event",
+}
+_LABELS = {"gs": "Guided scenario", "todo": "Assigned", "done": "Completed",
+           "closed": "Not completed before closing", "not published": "Not opened yet",
+           "lesson": "Mini-lesson", "paper": "Practice paper", "yes": "Yes", "no": "No",
+           "source.drawer_opened": "Source opened", "video.completed": "Video watched through",
+           "assessment.submitted": "Exam submitted", "turn.completed": "Question answered",
+           "session.started": "Session started"}
+_LONG_TEXT = {"student_message", "tutor_answer", "comment", "answer"}
+
+
+def format_dataset(dataset: str, header: list[str], rows: list[list]) -> tuple[list[str], list[list]]:
+    """Apply the guide without inventing unavailable measurements or labels."""
+    keys = [k for k in ("student_id", "name", "email") if k in header]
+    keys += [k for k in header if k not in keys and k not in _LONG_TEXT]
+    if dataset == "mastery":
+        keys.insert(keys.index("mastery_percent") + 1, "level")
+    keys += [k for k in header if k in _LONG_TEXT]
+    formatted = []
+    for values in rows:
+        record = dict(zip(header, values))
+        if dataset == "mastery":
+            score = float(record.get("mastery_percent") or 0)
+            record["level"] = "Secure" if score >= 70 else "Developing" if score >= 40 else "Struggling"
+        output = []
+        for key in keys:
+            value = record.get(key)
+            if value is not None and (key.endswith("_at") or key == "at"):
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                value = (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            elif key in {"mode", "format", "status", "required", "archived", "kind", "event", "role", "type"} and isinstance(value, str):
+                value = _LABELS.get(value, value.replace("_", " ").replace(".", " ").capitalize())
+            output.append(value)
+        formatted.append(output)
+    labels = [_HEADERS.get(k, k.replace("_", " ").capitalize()) for k in keys]
+    if dataset == "feedback" and "at" in keys:
+        labels[keys.index("at")] = "Given at (UTC)"
+    return labels, formatted
 
 
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
@@ -246,6 +309,11 @@ def download(
     """One dataset as CSV text: ``{filename, rows, csv}``."""
     assert_course_owner(user, course_id)
     lo, hi = day_bounds(start, end)
-    header, rows = DATASETS[dataset](get_supabase(), course_id, lo, hi)
+    sb = get_supabase()
+    header, rows = DATASETS[dataset](sb, course_id, lo, hi)
+    header, rows = format_dataset(dataset, header, rows)
     span = f"_{start or 'start'}_to_{end or 'now'}" if (start or end) else ""
-    return {"filename": f"{course_id}_{dataset}{span}.csv", "rows": len(rows), "csv": to_csv(header, rows)}
+    course = sb.table("courses").select("name").eq("id", course_id).execute().data or []
+    slug = re.sub(r"[^a-z0-9]+", "-", (course[0].get("name") or course_id).lower()).strip("-") if course else course_id
+    label = "activity-log" if dataset == "engagement" else dataset.replace("_", "-")
+    return {"filename": f"{slug}_{label}{span}.csv", "rows": len(rows), "csv": to_csv(header, rows)}
