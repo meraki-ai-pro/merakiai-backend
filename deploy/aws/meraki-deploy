@@ -140,7 +140,29 @@ if ! flock -n 9; then
   exit 75
 fi
 
+exec 3>&1
 exec > >(tee -a "$log_file") 2>&1
+
+# SSM keeps only a bounded command response. Dependency and Docker build
+# progress can otherwise consume that response before the useful error is
+# reached. Keep the complete output in deploy.log and send a bounded tail to
+# SSM only when a noisy command fails.
+run_logged() {
+  local label="$1"
+  shift
+  echo "--- ${label} ---"
+  if "$@" >>"$log_file" 2>&1; then
+    echo "--- ${label} complete ---"
+    return 0
+  else
+    local exit_code=$?
+    echo "${label} failed with exit code ${exit_code}" >&2
+    echo "--- last 160 deploy log lines ---" >&3
+    tail -n 160 "$log_file" >&3
+    return "$exit_code"
+  fi
+}
+
 echo "=== $(date -u +%FT%TZ) deploy ${environment} ${commit_sha} ==="
 
 previous_sha="$(sudo -u "$APP_USER" git -C "$APP_DIR" rev-parse HEAD)"
@@ -152,8 +174,9 @@ rollback() {
   if [[ "$switched" -eq 1 ]]; then
     echo "Deployment failed; rolling back to ${previous_sha}"
     sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$previous_sha"
-    sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
-      --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
+    run_logged "Restore previous dependencies" \
+      sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
+        --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
     refresh_service_units "$APP_DIR" || true
     if [[ "$environment" == "uat" ]]; then
       refresh_uat_edge "$APP_DIR" || true
@@ -185,8 +208,9 @@ fi
 
 sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$commit_sha"
 switched=1
-sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
-  --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
+run_logged "Install locked dependencies" \
+  sudo -u "$APP_USER" "$VENV_DIR/bin/python" -m pip install \
+    --require-hashes --requirement "$APP_DIR/requirements.lock.txt"
 refresh_service_units "$APP_DIR"
 
 if [[ "$environment" == "uat" ]]; then
@@ -194,7 +218,7 @@ if [[ "$environment" == "uat" ]]; then
 fi
 
 if [[ -n "$render_compose_file" ]]; then
-  render_compose "$commit_sha" build
+  run_logged "Build renderer images" render_compose "$commit_sha" build
 fi
 
 systemctl restart "${services[@]}"
