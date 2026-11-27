@@ -55,3 +55,17 @@ answer that a student cannot detect.
 `expect_no_answer` cases are scored inverted — success is the *absence* of a
 confident match. Mixing them into the same rule as the others would mark
 correct behaviour as failure.
+
+## Prompt-injection set
+
+`prompt-injection.jsonl` checks that student text cannot steer the tutor or the
+exam marker. Unlike the golden sets it calls the answering model, so it tests
+prompt changes rather than retrieval:
+
+```bash
+python scripts/eval_injection.py evals/prompt-injection.jsonl
+```
+
+`kind: tutor` cases take `must_not_contain` / `must_contain_any`; `kind: mark`
+cases take `min_score`, `max_score`, `expect_ok`. Exits non-zero on any failure.
+Run it after editing `prompt_builder.py`, `untrusted.py` or a marking prompt.
