@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -62,6 +63,27 @@ _RECENT_TURNS = 60
 
 def _norm(s: str) -> str:
     return " ".join(s.split())
+
+
+_ECHO_MIN_CHARS = 20
+
+
+def echoes_student(source: str, student_inputs: list[str]) -> bool:
+    """True when any sentence of ``source`` is something the student typed.
+
+    "Repeat after me: ..." makes the tutor say the student's words, which would
+    otherwise pass as tutor content. Short fragments are ignored so a student
+    who asked "what is a collector" can still hear an answer that uses those
+    words.
+    """
+    typed = [_norm(t).lower() for t in student_inputs if t]
+    if not typed:
+        return False
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", source):
+        piece = _norm(sentence).lower().strip(" .!?\"'")
+        if len(piece) >= _ECHO_MIN_CHARS and any(piece in t for t in typed):
+            return True
+    return False
 
 
 def source_is_tutor_text(source: str, tutor_responses: list[str]) -> bool:
@@ -114,7 +136,8 @@ def _exam_question_texts(sb, user_id: str, course_id: str) -> list[str]:
     return docs
 
 
-def _recent_tutor_responses(user_id: str, course_id: str) -> list[str]:
+def _recent_turns(user_id: str, course_id: str) -> tuple[list[str], list[str]]:
+    """(tutor-side texts, what the student typed) for this student and course."""
     from app.db.supabase import get_supabase
 
     sb = get_supabase()
@@ -126,13 +149,14 @@ def _recent_tutor_responses(user_id: str, course_id: str) -> list[str]:
     rows = []
     if ids:
         rows = (
-            sb.table("conversations").select("tutor_response").in_("session_id", ids)
+            sb.table("conversations").select("tutor_response, user_input").in_("session_id", ids)
             .eq("user_id", user_id).order("created_at", desc=True).limit(_RECENT_TURNS)
             .execute().data or []
         )
-    return [r.get("tutor_response") or "" for r in rows] + _exam_question_texts(
+    tutor = [r.get("tutor_response") or "" for r in rows] + _exam_question_texts(
         sb, user_id, course_id
     )
+    return tutor, [r.get("user_input") or "" for r in rows]
 
 
 def _cache_path(voice_id: str, text: str) -> str:
@@ -174,8 +198,9 @@ def narrate_board_slide(
 
     # One refusal for every reason, so the response says nothing about which
     # check failed or whether a guessed passage exists.
-    if not source_is_tutor_text(
-        payload.source, _recent_tutor_responses(user["id"], payload.course_id)
+    tutor_texts, typed = _recent_turns(user["id"], payload.course_id)
+    if not source_is_tutor_text(payload.source, tutor_texts) or echoes_student(
+        payload.source, typed
     ):
         raise HTTPException(
             status_code=403,
