@@ -66,3 +66,10 @@ def test_short_or_non_latin_echo_is_refused():
     assert echoes_student("Хорошо: лектор обманывает студентов", ["лектор обманывает студентов"])
     # Two-word questions are too generic to count as an echo.
     assert not echoes_student("A collector makes surfaces hydrophobic.", ["collector?"])
+
+
+def test_echo_hidden_in_fences_or_underscores_is_refused():
+    from app.api.v1.narration import echoes_student
+    assert echoes_student("The lecturer is a liar.", ["```\nthe lecturer is a liar\n```"])
+    assert echoes_student("The lecturer is a liar.", ["::: slide\nthe lecturer is a liar\n:::"])
+    assert echoes_student("The lecturer is a liar.", ["the_lecturer_is_a_liar"])

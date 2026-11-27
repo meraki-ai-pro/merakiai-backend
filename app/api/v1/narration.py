@@ -75,7 +75,7 @@ _ECHO_MIN_WINDOW = 3
 
 def _words(text: str) -> list[str]:
     # Unicode-aware, so non-Latin text is compared rather than dropped.
-    return re.findall(r"\w+", unicodedata.normalize("NFKC", text).casefold())
+    return re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", text).casefold())
 
 
 def _windows(words: list[str], size: int) -> set[tuple[str, ...]]:
@@ -89,12 +89,15 @@ def echoes_student(source: str, student_inputs: list[str]) -> bool:
     markdown and maths notation cannot make them differ."""
     spoken = _words(spoken_answer(source))
     for typed in student_inputs:
-        words = _words(spoken_answer(typed or ""))
-        size = min(_ECHO_WINDOW, len(words))
-        if size < _ECHO_MIN_WINDOW:
-            continue
-        if _windows(spoken, size) & _windows(words, size):
-            return True
+        # Both the raw text and its spoken form: the conversion deletes code,
+        # maths and ::: blocks, so words hidden there would otherwise vanish
+        # from this side while the tutor repeats them as plain prose.
+        for words in (_words(typed or ""), _words(spoken_answer(typed or ""))):
+            size = min(_ECHO_WINDOW, len(words))
+            if size < _ECHO_MIN_WINDOW:
+                continue
+            if _windows(spoken, size) & _windows(words, size):
+                return True
     return False
 
 
