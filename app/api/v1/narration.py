@@ -65,25 +65,34 @@ def _norm(s: str) -> str:
     return " ".join(s.split())
 
 
-_ECHO_MIN_CHARS = 20
+# Six consecutive words the student typed, appearing in what would be spoken,
+# is an echo. Short enough to catch a phrase split across "sentences" or
+# dressed in markdown; long enough that an answer reusing the question's words
+# ("what does a collector do") is not caught.
+_ECHO_WINDOW = 6
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.casefold())
 
 
 def echoes_student(source: str, student_inputs: list[str]) -> bool:
-    """True when any sentence of ``source`` is something the student typed.
-
-    "Repeat after me: ..." makes the tutor say the student's words, which would
-    otherwise pass as tutor content. Short fragments are ignored so a student
-    who asked "what is a collector" can still hear an answer that uses those
-    words.
-    """
-    typed = [_norm(t).lower() for t in student_inputs if t]
-    if not typed:
+    """True when the spoken form of ``source`` repeats a run of words the
+    student typed ("repeat after me: ..."), which would otherwise pass as
+    tutor content. Compared on the exact text that would be synthesised."""
+    spoken = _words(spoken_answer(source))
+    typed_windows = set()
+    for t in student_inputs:
+        w = _words(t or "")
+        typed_windows.update(
+            tuple(w[i:i + _ECHO_WINDOW]) for i in range(len(w) - _ECHO_WINDOW + 1)
+        )
+    if not typed_windows:
         return False
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", source):
-        piece = _norm(sentence).lower().strip(" .!?\"'")
-        if len(piece) >= _ECHO_MIN_CHARS and any(piece in t for t in typed):
-            return True
-    return False
+    return any(
+        tuple(spoken[i:i + _ECHO_WINDOW]) in typed_windows
+        for i in range(len(spoken) - _ECHO_WINDOW + 1)
+    )
 
 
 def source_is_tutor_text(source: str, tutor_responses: list[str]) -> bool:
